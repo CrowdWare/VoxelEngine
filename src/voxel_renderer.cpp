@@ -718,8 +718,8 @@ bool VoxelRenderer::init(VkDevice device,
     if (vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pick_pipe, nullptr, &pick_pipeline_) != VK_SUCCESS)
         return false;
 
-    const float ground_uv_scale = 1.0f / 0.6f;
-    const float ground_uv_offset = 1.0f;
+    const float ground_uv_scale = 1.0f / block_scale_;
+    const float ground_uv_offset = 0.0f;
     Vertex ground_vertices[] = {
         {{-10.0f, 0.0f, -10.0f}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f, 0.0f}, {-10.0f * ground_uv_scale + ground_uv_offset, -10.0f * ground_uv_scale + ground_uv_offset}},
         {{ 10.0f, 0.0f, -10.0f}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f, 0.0f}, { 10.0f * ground_uv_scale + ground_uv_offset, -10.0f * ground_uv_scale + ground_uv_offset}},
