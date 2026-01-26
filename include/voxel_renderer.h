@@ -23,7 +23,9 @@ public:
               const char* vertex_shader_path,
               const char* fragment_shader_path,
               const char* pick_vertex_shader_path,
-              const char* pick_fragment_shader_path);
+              const char* pick_fragment_shader_path,
+              const char* ground_texture_path,
+              const char* cube_texture_path);
     void shutdown();
     void render(VkCommandBuffer cmd, int width, int height);
     void setCamera(float x, float y, float z, float yaw_radians, float pitch_radians);
@@ -37,6 +39,7 @@ private:
         float pos[3];
         float color[3];
         float normal[3];
+        float uv[2];
     };
 
 public:
@@ -48,6 +51,10 @@ private:
     bool createShaderModule(const char* path, VkShaderModule* out_module);
     bool createVertexBuffer(const Vertex* vertices, size_t count, VkBuffer* out_buffer, VkDeviceMemory* out_memory);
     uint32_t findMemoryType(uint32_t type_filter, VkMemoryPropertyFlags properties) const;
+    bool createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer* out_buffer, VkDeviceMemory* out_memory);
+    bool createTextureImage(const char* path, VkImage* out_image, VkDeviceMemory* out_memory, VkImageView* out_view);
+    void transitionImageLayout(VkCommandBuffer cmd, VkImage image, VkFormat format, VkImageLayout old_layout, VkImageLayout new_layout);
+    void copyBufferToImage(VkCommandBuffer cmd, VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
 
     Mat4 mat4Identity() const;
     Mat4 mat4Multiply(const Mat4& a, const Mat4& b) const;
@@ -66,6 +73,16 @@ private:
     VkPipeline pipeline_;
     VkShaderModule vert_shader_;
     VkShaderModule frag_shader_;
+    VkDescriptorSetLayout descriptor_set_layout_;
+    VkDescriptorPool descriptor_pool_;
+    VkDescriptorSet descriptor_set_;
+    VkSampler texture_sampler_;
+    VkImage ground_texture_image_;
+    VkDeviceMemory ground_texture_memory_;
+    VkImageView ground_texture_view_;
+    VkImage cube_texture_image_;
+    VkDeviceMemory cube_texture_memory_;
+    VkImageView cube_texture_view_;
     VkBuffer ground_buffer_;
     VkDeviceMemory ground_memory_;
     VkBuffer cube_buffer_;

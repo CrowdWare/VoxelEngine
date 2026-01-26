@@ -4,6 +4,7 @@ project(VoxelEngine LANGUAGES CXX)
 add_library(VoxelEngine STATIC
     src/voxel_engine.cpp
     src/voxel_renderer.cpp
+    src/stb_image_impl.cpp
 )
 
 target_include_directories(VoxelEngine PUBLIC
