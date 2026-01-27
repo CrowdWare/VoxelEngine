@@ -994,7 +994,9 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
             Mat4 rot_x = mat4RotateX(ToRadians(block.rot_x_deg));
             Mat4 rot_y = mat4RotateY(ToRadians(block.rot_y_deg));
             Mat4 rot_z = mat4RotateZ(ToRadians(block.rot_z_deg));
-            Mat4 rotate = mat4Multiply(rot_z, mat4Multiply(rot_y, rot_x));
+            // Apply yaw (Y) last so turning left/right doesn't change which face is up.
+            // With column vectors, the right-most rotation is applied first.
+            Mat4 rotate = mat4Multiply(rot_y, mat4Multiply(rot_x, rot_z));
             Mat4 model = mat4Multiply(translate, mat4Multiply(rotate, scale));
             PushConstants pc = {};
             pc.mvp = mat4Multiply(proj, mat4Multiply(view, model));
@@ -1292,7 +1294,7 @@ bool VoxelRenderer::pickRect(uint32_t x, uint32_t y, uint32_t width, uint32_t he
         Mat4 rot_x = mat4RotateX(ToRadians(blocks_[i].rot_x_deg));
         Mat4 rot_y = mat4RotateY(ToRadians(blocks_[i].rot_y_deg));
         Mat4 rot_z = mat4RotateZ(ToRadians(blocks_[i].rot_z_deg));
-        Mat4 rotate = mat4Multiply(rot_z, mat4Multiply(rot_y, rot_x));
+        Mat4 rotate = mat4Multiply(rot_y, mat4Multiply(rot_x, rot_z));
         Mat4 model = mat4Multiply(translate, mat4Multiply(rotate, scale));
         PickPush pc = {};
         pc.mvp = mat4Multiply(proj, mat4Multiply(view, model));
