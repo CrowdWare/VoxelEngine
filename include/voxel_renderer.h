@@ -32,8 +32,19 @@ public:
         float x;
         float y;
         float z;
+        float rot_x_deg = 0.0f;
+        float rot_y_deg = 0.0f;
+        float rot_z_deg = 0.0f;
         int tex_index = 0;
         std::string key;
+        int mesh_index = -1;
+    };
+
+    struct MeshData {
+        std::vector<float> positions;
+        std::vector<float> normals;
+        std::vector<float> uvs;
+        std::vector<float> colors;
     };
 
     VoxelRenderer();
@@ -53,6 +64,7 @@ public:
     void setCamera(float x, float y, float z, float yaw_radians, float pitch_radians);
     void setBlocks(const std::vector<Block>& blocks, float block_size);
     void setSelection(const std::vector<unsigned char>& selected_flags);
+    void setBlockMeshes(const std::vector<MeshData>& meshes);
     void resizePickResources(uint32_t width, uint32_t height);
     bool pickRect(uint32_t x, uint32_t y, uint32_t width, uint32_t height, std::vector<unsigned char>* out_flags);
 
@@ -67,6 +79,11 @@ private:
         VkImage image = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
+    };
+    struct MeshBuffer {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        uint32_t vertex_count = 0;
     };
 
 public:
@@ -90,6 +107,9 @@ private:
                     float at_x, float at_y, float at_z,
                     float up_x, float up_y, float up_z) const;
     Mat4 mat4Translate(float x, float y, float z) const;
+    Mat4 mat4RotateX(float radians) const;
+    Mat4 mat4RotateY(float radians) const;
+    Mat4 mat4RotateZ(float radians) const;
 
     VkDevice device_;
     VkPhysicalDevice physical_device_;
@@ -114,6 +134,7 @@ private:
     VkDeviceMemory cube_memory_;
     uint32_t ground_vertex_count_;
     uint32_t cube_vertex_count_;
+    std::vector<MeshBuffer> block_meshes_;
     float camera_pos_[3];
     float camera_yaw_;
     float camera_pitch_;

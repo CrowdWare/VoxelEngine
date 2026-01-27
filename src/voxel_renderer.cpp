@@ -162,6 +162,39 @@ VoxelRenderer::Mat4 VoxelRenderer::mat4Translate(float x, float y, float z) cons
     return m;
 }
 
+VoxelRenderer::Mat4 VoxelRenderer::mat4RotateX(float radians) const {
+    Mat4 m = mat4Identity();
+    float c = std::cos(radians);
+    float s = std::sin(radians);
+    m.m[5] = c;
+    m.m[6] = s;
+    m.m[9] = -s;
+    m.m[10] = c;
+    return m;
+}
+
+VoxelRenderer::Mat4 VoxelRenderer::mat4RotateY(float radians) const {
+    Mat4 m = mat4Identity();
+    float c = std::cos(radians);
+    float s = std::sin(radians);
+    m.m[0] = c;
+    m.m[2] = -s;
+    m.m[8] = s;
+    m.m[10] = c;
+    return m;
+}
+
+VoxelRenderer::Mat4 VoxelRenderer::mat4RotateZ(float radians) const {
+    Mat4 m = mat4Identity();
+    float c = std::cos(radians);
+    float s = std::sin(radians);
+    m.m[0] = c;
+    m.m[1] = s;
+    m.m[4] = -s;
+    m.m[5] = c;
+    return m;
+}
+
 static VoxelRenderer::Mat4 mat4ScaleInternal(float x, float y, float z) {
     VoxelRenderer::Mat4 m = {};
     m.m[0] = x;
@@ -808,6 +841,13 @@ void VoxelRenderer::shutdown() {
         vkDestroyBuffer(device_, cube_buffer_, nullptr);
     if (cube_memory_)
         vkFreeMemory(device_, cube_memory_, nullptr);
+    for (size_t i = 0; i < block_meshes_.size(); ++i) {
+        if (block_meshes_[i].buffer)
+            vkDestroyBuffer(device_, block_meshes_[i].buffer, nullptr);
+        if (block_meshes_[i].memory)
+            vkFreeMemory(device_, block_meshes_[i].memory, nullptr);
+    }
+    block_meshes_.clear();
     if (pipeline_)
         vkDestroyPipeline(device_, pipeline_, nullptr);
     if (pipeline_layout_)
@@ -921,7 +961,6 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
     vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &ground_pc);
     vkCmdDraw(cmd, ground_vertex_count_, 1, 0, 0);
 
-    vkCmdBindVertexBuffers(cmd, 0, 1, &cube_buffer_, &offset);
     Mat4 scale = mat4ScaleInternal(block_scale_, block_scale_, block_scale_);
     if (!blocks_.empty()) {
         struct DrawItem {
@@ -941,8 +980,22 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
 
         for (size_t i = 0; i < draw_items.size(); ++i) {
             const Block& block = blocks_[draw_items[i].index];
+            VkBuffer vb = cube_buffer_;
+            uint32_t vcount = cube_vertex_count_;
+            if (block.mesh_index >= 0 && (size_t)block.mesh_index < block_meshes_.size()) {
+                const MeshBuffer& mesh = block_meshes_[block.mesh_index];
+                if (mesh.buffer && mesh.vertex_count > 0) {
+                    vb = mesh.buffer;
+                    vcount = mesh.vertex_count;
+                }
+            }
+            vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &offset);
             Mat4 translate = mat4Translate(block.x, block.y, block.z);
-            Mat4 model = mat4Multiply(translate, scale);
+            Mat4 rot_x = mat4RotateX(ToRadians(block.rot_x_deg));
+            Mat4 rot_y = mat4RotateY(ToRadians(block.rot_y_deg));
+            Mat4 rot_z = mat4RotateZ(ToRadians(block.rot_z_deg));
+            Mat4 rotate = mat4Multiply(rot_z, mat4Multiply(rot_y, rot_x));
+            Mat4 model = mat4Multiply(translate, mat4Multiply(rotate, scale));
             PushConstants pc = {};
             pc.mvp = mat4Multiply(proj, mat4Multiply(view, model));
             bool selected = (draw_items[i].index < selected_flags_.size() && selected_flags_[draw_items[i].index] != 0);
@@ -951,9 +1004,10 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
             pc.tint[2] = selected ? 0.1f : 1.0f;
             pc.tint[3] = (float)block.tex_index;
             vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &pc);
-            vkCmdDraw(cmd, cube_vertex_count_, 1, 0, 0);
+            vkCmdDraw(cmd, vcount, 1, 0, 0);
         }
     } else {
+        vkCmdBindVertexBuffers(cmd, 0, 1, &cube_buffer_, &offset);
         Mat4 translate = mat4Translate(0.0f, 0.5f, 0.0f);
         Mat4 model = mat4Multiply(translate, scale);
         PushConstants pc = {};
@@ -983,6 +1037,63 @@ void VoxelRenderer::setBlocks(const std::vector<Block>& blocks, float block_size
 
 void VoxelRenderer::setSelection(const std::vector<unsigned char>& selected_flags) {
     selected_flags_ = selected_flags;
+}
+
+void VoxelRenderer::setBlockMeshes(const std::vector<MeshData>& meshes) {
+    for (size_t i = 0; i < block_meshes_.size(); ++i) {
+        if (block_meshes_[i].buffer)
+            vkDestroyBuffer(device_, block_meshes_[i].buffer, nullptr);
+        if (block_meshes_[i].memory)
+            vkFreeMemory(device_, block_meshes_[i].memory, nullptr);
+    }
+    block_meshes_.clear();
+
+    block_meshes_.resize(meshes.size());
+    for (size_t i = 0; i < meshes.size(); ++i) {
+        const MeshData& mesh = meshes[i];
+        size_t count = mesh.positions.size() / 3;
+        if (count == 0)
+            continue;
+
+        std::vector<Vertex> verts;
+        verts.resize(count);
+        for (size_t v = 0; v < count; ++v) {
+            verts[v].pos[0] = mesh.positions[v * 3 + 0];
+            verts[v].pos[1] = mesh.positions[v * 3 + 1];
+            verts[v].pos[2] = mesh.positions[v * 3 + 2];
+            if (mesh.normals.size() >= (v + 1) * 3) {
+                verts[v].normal[0] = mesh.normals[v * 3 + 0];
+                verts[v].normal[1] = mesh.normals[v * 3 + 1];
+                verts[v].normal[2] = mesh.normals[v * 3 + 2];
+            } else {
+                verts[v].normal[0] = 0.0f;
+                verts[v].normal[1] = 1.0f;
+                verts[v].normal[2] = 0.0f;
+            }
+            if (mesh.uvs.size() >= (v + 1) * 2) {
+                verts[v].uv[0] = mesh.uvs[v * 2 + 0];
+                verts[v].uv[1] = mesh.uvs[v * 2 + 1];
+            } else {
+                verts[v].uv[0] = 0.0f;
+                verts[v].uv[1] = 0.0f;
+            }
+            if (mesh.colors.size() >= (v + 1) * 4) {
+                verts[v].color[0] = mesh.colors[v * 4 + 0];
+                verts[v].color[1] = mesh.colors[v * 4 + 1];
+                verts[v].color[2] = mesh.colors[v * 4 + 2];
+            } else {
+                verts[v].color[0] = 1.0f;
+                verts[v].color[1] = 1.0f;
+                verts[v].color[2] = 1.0f;
+            }
+        }
+
+        MeshBuffer buffer = {};
+        if (createVertexBuffer(verts.data(), verts.size(), &buffer.buffer, &buffer.memory)) {
+            buffer.vertex_count = (uint32_t)verts.size();
+            block_meshes_[i] = buffer;
+        }
+    }
 }
 
 void VoxelRenderer::resizePickResources(uint32_t width, uint32_t height) {
@@ -1178,7 +1289,11 @@ bool VoxelRenderer::pickRect(uint32_t x, uint32_t y, uint32_t width, uint32_t he
     Mat4 scale = mat4ScaleInternal(block_scale_, block_scale_, block_scale_);
     for (size_t i = 0; i < blocks_.size(); ++i) {
         Mat4 translate = mat4Translate(blocks_[i].x, blocks_[i].y, blocks_[i].z);
-        Mat4 model = mat4Multiply(translate, scale);
+        Mat4 rot_x = mat4RotateX(ToRadians(blocks_[i].rot_x_deg));
+        Mat4 rot_y = mat4RotateY(ToRadians(blocks_[i].rot_y_deg));
+        Mat4 rot_z = mat4RotateZ(ToRadians(blocks_[i].rot_z_deg));
+        Mat4 rotate = mat4Multiply(rot_z, mat4Multiply(rot_y, rot_x));
+        Mat4 model = mat4Multiply(translate, mat4Multiply(rotate, scale));
         PickPush pc = {};
         pc.mvp = mat4Multiply(proj, mat4Multiply(view, model));
         pc.id = (uint32_t)(i + 1);
