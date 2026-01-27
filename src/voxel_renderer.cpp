@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <string>
 #include <vector>
 
 #include "../third_party/stb_image.h"
@@ -46,9 +47,6 @@ VoxelRenderer::VoxelRenderer()
     , ground_texture_image_(VK_NULL_HANDLE)
     , ground_texture_memory_(VK_NULL_HANDLE)
     , ground_texture_view_(VK_NULL_HANDLE)
-    , cube_texture_image_(VK_NULL_HANDLE)
-    , cube_texture_memory_(VK_NULL_HANDLE)
-    , cube_texture_view_(VK_NULL_HANDLE)
     , ground_buffer_(VK_NULL_HANDLE)
     , ground_memory_(VK_NULL_HANDLE)
     , cube_buffer_(VK_NULL_HANDLE)
@@ -382,6 +380,8 @@ bool VoxelRenderer::createVertexBuffer(const Vertex* vertices, size_t count, VkB
     return true;
 }
 
+static const uint32_t kMaxBlockTextures = 8;
+
 bool VoxelRenderer::init(VkDevice device,
                          VkPhysicalDevice physical_device,
                          VkQueue queue,
@@ -392,7 +392,7 @@ bool VoxelRenderer::init(VkDevice device,
                          const char* pick_vertex_shader_path,
                          const char* pick_fragment_shader_path,
                          const char* ground_texture_path,
-                         const char* cube_texture_path) {
+                         const std::vector<std::string>& block_texture_paths) {
     device_ = device;
     physical_device_ = physical_device;
     queue_ = queue;
@@ -415,7 +415,7 @@ bool VoxelRenderer::init(VkDevice device,
     sampler_bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     sampler_bindings[1].binding = 1;
     sampler_bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sampler_bindings[1].descriptorCount = 1;
+    sampler_bindings[1].descriptorCount = kMaxBlockTextures;
     sampler_bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
     VkDescriptorSetLayoutCreateInfo desc_layout_info = {};
@@ -560,8 +560,19 @@ bool VoxelRenderer::init(VkDevice device,
 
     if (!createTextureImage(ground_texture_path, &ground_texture_image_, &ground_texture_memory_, &ground_texture_view_))
         return false;
-    if (!createTextureImage(cube_texture_path, &cube_texture_image_, &cube_texture_memory_, &cube_texture_view_))
-        return false;
+
+    block_textures_.clear();
+    std::vector<std::string> paths = block_texture_paths;
+    if (paths.empty())
+        paths.push_back(ground_texture_path);
+    if (paths.size() > kMaxBlockTextures)
+        paths.resize(kMaxBlockTextures);
+    for (size_t i = 0; i < paths.size(); ++i) {
+        BlockTexture tex = {};
+        if (!createTextureImage(paths[i].c_str(), &tex.image, &tex.memory, &tex.view))
+            return false;
+        block_textures_.push_back(tex);
+    }
 
     VkSamplerCreateInfo sampler_info = {};
     sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -577,7 +588,7 @@ bool VoxelRenderer::init(VkDevice device,
 
     VkDescriptorPoolSize pool_size = {};
     pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    pool_size.descriptorCount = 2;
+    pool_size.descriptorCount = 1 + kMaxBlockTextures;
     VkDescriptorPoolCreateInfo pool_info_desc = {};
     pool_info_desc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_info_desc.poolSizeCount = 1;
@@ -594,13 +605,16 @@ bool VoxelRenderer::init(VkDevice device,
     if (vkAllocateDescriptorSets(device_, &alloc_info_desc, &descriptor_set_) != VK_SUCCESS)
         return false;
 
-    VkDescriptorImageInfo image_infos[2] = {};
+    VkDescriptorImageInfo image_infos[1 + kMaxBlockTextures] = {};
     image_infos[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     image_infos[0].imageView = ground_texture_view_;
     image_infos[0].sampler = texture_sampler_;
-    image_infos[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    image_infos[1].imageView = cube_texture_view_;
-    image_infos[1].sampler = texture_sampler_;
+    for (uint32_t i = 0; i < kMaxBlockTextures; ++i) {
+        const BlockTexture& tex = (i < block_textures_.size()) ? block_textures_[i] : block_textures_[0];
+        image_infos[1 + i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        image_infos[1 + i].imageView = tex.view;
+        image_infos[1 + i].sampler = texture_sampler_;
+    }
 
     VkWriteDescriptorSet writes[2] = {};
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -613,7 +627,7 @@ bool VoxelRenderer::init(VkDevice device,
     writes[1].dstSet = descriptor_set_;
     writes[1].dstBinding = 1;
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[1].descriptorCount = 1;
+    writes[1].descriptorCount = kMaxBlockTextures;
     writes[1].pImageInfo = &image_infos[1];
     vkUpdateDescriptorSets(device_, 2, writes, 0, nullptr);
 
@@ -732,46 +746,46 @@ bool VoxelRenderer::init(VkDevice device,
 
     Vertex cube_vertices[] = {
         {{-0.5f, -0.5f, -0.5f}, {0.85f, 0.85f, 0.85f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}},
-        {{ 0.5f, -0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}},
-        {{ 0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}},
+        {{ 0.5f, -0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}},
+        {{ 0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}},
         {{-0.5f, -0.5f, -0.5f}, {0.85f, 0.85f, 0.85f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}},
-        {{ 0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}},
-        {{-0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}},
+        {{ 0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}},
+        {{-0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}},
 
         {{-0.5f, -0.5f,  0.5f}, {0.85f, 0.85f, 0.85f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
-        {{ 0.5f,  0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
-        {{ 0.5f, -0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
+        {{ 0.5f,  0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
+        {{ 0.5f, -0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},
         {{-0.5f, -0.5f,  0.5f}, {0.85f, 0.85f, 0.85f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
-        {{-0.5f,  0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
-        {{ 0.5f,  0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
+        {{-0.5f,  0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
+        {{ 0.5f,  0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
 
         {{-0.5f,  0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
-        {{-0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
-        {{ 0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+        {{-0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}},
+        {{ 0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}},
         {{-0.5f,  0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
-        {{ 0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
-        {{ 0.5f,  0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+        {{ 0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}},
+        {{ 0.5f,  0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
 
         {{-0.5f, -0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}},
-        {{ 0.5f, -0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}},
-        {{-0.5f, -0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}},
+        {{ 0.5f, -0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}},
+        {{-0.5f, -0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}},
         {{-0.5f, -0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}},
-        {{ 0.5f, -0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}},
-        {{ 0.5f, -0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}},
+        {{ 0.5f, -0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}},
+        {{ 0.5f, -0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}},
 
         {{ 0.5f, -0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-        {{ 0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-        {{ 0.5f, -0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+        {{ 0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}},
+        {{ 0.5f, -0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
         {{ 0.5f, -0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-        {{ 0.5f,  0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-        {{ 0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+        {{ 0.5f,  0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}},
+        {{ 0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}},
 
         {{-0.5f, -0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-        {{-0.5f, -0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-        {{-0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+        {{-0.5f, -0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
+        {{-0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {-1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}},
         {{-0.5f, -0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-        {{-0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-        {{-0.5f,  0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}}
+        {{-0.5f,  0.5f, -0.5f}, {0.7f, 0.7f, 0.7f}, {-1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}},
+        {{-0.5f,  0.5f,  0.5f}, {0.7f, 0.7f, 0.7f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}}
     };
     cube_vertex_count_ = 36;
 
@@ -814,12 +828,15 @@ void VoxelRenderer::shutdown() {
         vkDestroyImage(device_, ground_texture_image_, nullptr);
     if (ground_texture_memory_)
         vkFreeMemory(device_, ground_texture_memory_, nullptr);
-    if (cube_texture_view_)
-        vkDestroyImageView(device_, cube_texture_view_, nullptr);
-    if (cube_texture_image_)
-        vkDestroyImage(device_, cube_texture_image_, nullptr);
-    if (cube_texture_memory_)
-        vkFreeMemory(device_, cube_texture_memory_, nullptr);
+    for (size_t i = 0; i < block_textures_.size(); ++i) {
+        if (block_textures_[i].view)
+            vkDestroyImageView(device_, block_textures_[i].view, nullptr);
+        if (block_textures_[i].image)
+            vkDestroyImage(device_, block_textures_[i].image, nullptr);
+        if (block_textures_[i].memory)
+            vkFreeMemory(device_, block_textures_[i].memory, nullptr);
+    }
+    block_textures_.clear();
     if (pick_pipeline_)
         vkDestroyPipeline(device_, pick_pipeline_, nullptr);
     if (pick_pipeline_layout_)
@@ -900,7 +917,7 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
     ground_pc.tint[0] = 1.0f;
     ground_pc.tint[1] = 1.0f;
     ground_pc.tint[2] = 1.0f;
-    ground_pc.tint[3] = 1.0f;
+    ground_pc.tint[3] = -1.0f;
     vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &ground_pc);
     vkCmdDraw(cmd, ground_vertex_count_, 1, 0, 0);
 
@@ -932,7 +949,7 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
             pc.tint[0] = selected ? 1.0f : 1.0f;
             pc.tint[1] = selected ? 1.0f : 1.0f;
             pc.tint[2] = selected ? 0.1f : 1.0f;
-            pc.tint[3] = 2.0f;
+            pc.tint[3] = (float)block.tex_index;
             vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &pc);
             vkCmdDraw(cmd, cube_vertex_count_, 1, 0, 0);
         }
@@ -944,7 +961,7 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
         pc.tint[0] = 1.0f;
         pc.tint[1] = 1.0f;
         pc.tint[2] = 1.0f;
-        pc.tint[3] = 2.0f;
+        pc.tint[3] = 0.0f;
         vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &pc);
         vkCmdDraw(cmd, cube_vertex_count_, 1, 0, 0);
     }

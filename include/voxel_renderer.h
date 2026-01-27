@@ -22,6 +22,7 @@
 
 #include <vulkan/vulkan.h>
 #include <vector>
+#include <string>
 
 namespace voxel {
 
@@ -31,6 +32,8 @@ public:
         float x;
         float y;
         float z;
+        int tex_index = 0;
+        std::string key;
     };
 
     VoxelRenderer();
@@ -44,7 +47,7 @@ public:
               const char* pick_vertex_shader_path,
               const char* pick_fragment_shader_path,
               const char* ground_texture_path,
-              const char* cube_texture_path);
+              const std::vector<std::string>& block_texture_paths);
     void shutdown();
     void render(VkCommandBuffer cmd, int width, int height);
     void setCamera(float x, float y, float z, float yaw_radians, float pitch_radians);
@@ -59,6 +62,11 @@ private:
         float color[3];
         float normal[3];
         float uv[2];
+    };
+    struct BlockTexture {
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
     };
 
 public:
@@ -99,9 +107,7 @@ private:
     VkImage ground_texture_image_;
     VkDeviceMemory ground_texture_memory_;
     VkImageView ground_texture_view_;
-    VkImage cube_texture_image_;
-    VkDeviceMemory cube_texture_memory_;
-    VkImageView cube_texture_view_;
+    std::vector<BlockTexture> block_textures_;
     VkBuffer ground_buffer_;
     VkDeviceMemory ground_memory_;
     VkBuffer cube_buffer_;
