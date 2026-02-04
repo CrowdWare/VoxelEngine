@@ -6,9 +6,12 @@
 namespace voxel {
 
 struct Vec3 {
-    float x = 0.0f;
-    float y = 0.0f;
-    float z = 0.0f;
+    float x;
+    float y;
+    float z;
+
+    Vec3() = default;
+    constexpr Vec3(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
 };
 
 struct CharacterConfig {
