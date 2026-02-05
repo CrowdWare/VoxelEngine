@@ -6,13 +6,16 @@ add_library(VoxelEngine STATIC
     src/voxel_renderer.cpp
     src/voxel_character_controller.cpp
     src/stb_image_impl.cpp
+    src/gltf_loader.cpp
+    src/tile_catalog.cpp
 )
 
 target_include_directories(VoxelEngine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../RaidBuilder/third_party/tinygltf/tinygltf-2.9.7
 )
 
 target_compile_features(VoxelEngine PUBLIC cxx_std_11)
 
 find_package(Vulkan REQUIRED)
-target_link_libraries(VoxelEngine PUBLIC Vulkan::Vulkan)
+target_link_libraries(VoxelEngine PUBLIC Vulkan::Vulkan SMLParser)
