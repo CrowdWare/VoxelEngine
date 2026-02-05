@@ -14,6 +14,9 @@
 #include <vector>
 #include <cmath>
 #include <map>
+#include <cstdio>
+#include <cstdlib>
+#include <cctype>
 
 struct AnimationCacheEntry {
     GltfAnimationLibrary library;
@@ -22,6 +25,21 @@ struct AnimationCacheEntry {
 };
 
 static std::map<std::string, AnimationCacheEntry> g_animation_cache;
+
+static bool MeshDebugEnabled() {
+    const char* value = std::getenv("DEBUG_MESHES");
+    if (!value)
+        return false;
+    std::string v(value);
+    for (size_t i = 0; i < v.size(); ++i)
+        v[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(v[i])));
+    return v == "1" || v == "true" || v == "yes" || v == "on";
+}
+
+static void DebugMeshLog(const std::string& message) {
+    if (MeshDebugEnabled())
+        std::fprintf(stderr, "%s\n", message.c_str());
+}
 
 static void SplitPathFragment(const std::string& path, std::string* base, std::string* fragment) {
     if (base)
@@ -38,6 +56,29 @@ static void SplitPathFragment(const std::string& path, std::string* base, std::s
         *base = path.substr(0, hash);
     if (fragment)
         *fragment = path.substr(hash + 1);
+}
+
+static std::vector<std::string> SplitMeshSelectors(const std::string& fragment) {
+    std::vector<std::string> selectors;
+    if (fragment.empty()) {
+        selectors.push_back(std::string());
+        return selectors;
+    }
+    size_t start = 0;
+    while (start < fragment.size()) {
+        size_t next = fragment.find('#', start);
+        std::string part = (next == std::string::npos)
+                               ? fragment.substr(start)
+                               : fragment.substr(start, next - start);
+        if (!part.empty())
+            selectors.push_back(part);
+        if (next == std::string::npos)
+            break;
+        start = next + 1;
+    }
+    if (selectors.empty())
+        selectors.push_back(std::string());
+    return selectors;
 }
 
 static int FindMeshIndexByName(const tinygltf::Model& model, const std::string& name) {
@@ -167,6 +208,7 @@ bool LoadGltfMesh(const std::string& path, GltfMesh* out_mesh, std::string* erro
     SplitPathFragment(path, &base_path, &mesh_selector);
     if (base_path.empty())
         base_path = path;
+    std::vector<std::string> selectors = SplitMeshSelectors(mesh_selector);
 
     tinygltf::TinyGLTF loader;
     tinygltf::Model model;
@@ -185,86 +227,108 @@ bool LoadGltfMesh(const std::string& path, GltfMesh* out_mesh, std::string* erro
             *error = "No mesh primitives";
         return false;
     }
-    int mesh_index = FindMeshIndexByName(model, mesh_selector);
-    if (mesh_index < 0) {
-        if (error)
-            *error = std::string("Mesh not found: ") + mesh_selector;
-        return false;
-    }
-    if (model.meshes[mesh_index].primitives.empty()) {
-        if (error)
-            *error = "No mesh primitives";
-        return false;
-    }
-
-    const tinygltf::Primitive& prim = model.meshes[mesh_index].primitives[0];
-    auto it_pos = prim.attributes.find("POSITION");
-    if (it_pos == prim.attributes.end()) {
-        if (error)
-            *error = "Missing POSITION";
-        return false;
-    }
-
-    std::vector<float> positions;
-    if (!ReadAccessor(model, model.accessors[it_pos->second], &positions, 3))
-        return false;
-
-    std::vector<float> normals;
-    auto it_norm = prim.attributes.find("NORMAL");
-    if (it_norm != prim.attributes.end())
-        ReadAccessor(model, model.accessors[it_norm->second], &normals, 3);
-
-    std::vector<float> uvs;
-    auto it_uv = prim.attributes.find("TEXCOORD_0");
-    if (it_uv != prim.attributes.end()) {
-        if (ReadAccessor(model, model.accessors[it_uv->second], &uvs, 2))
-            out_mesh->has_uv = true;
-    }
-
-    std::vector<float> colors;
-    auto it_col = prim.attributes.find("COLOR_0");
-    if (it_col != prim.attributes.end())
-        ReadAccessor(model, model.accessors[it_col->second], &colors, 4);
-
-    std::vector<uint32_t> indices;
-    bool has_indices = (prim.indices >= 0);
-    if (has_indices)
-        ReadIndices(model, model.accessors[prim.indices], &indices);
-
-    // Expand to non-indexed vertices
     std::vector<float> out_pos;
     std::vector<float> out_norm;
     std::vector<float> out_uv;
     std::vector<float> out_col;
+    bool any_uv = false;
 
-    auto push_vertex = [&](uint32_t idx) {
-        out_pos.push_back(positions[idx * 3 + 0]);
-        out_pos.push_back(positions[idx * 3 + 1]);
-        out_pos.push_back(positions[idx * 3 + 2]);
-        if (!normals.empty()) {
-            out_norm.push_back(normals[idx * 3 + 0]);
-            out_norm.push_back(normals[idx * 3 + 1]);
-            out_norm.push_back(normals[idx * 3 + 2]);
+    if (MeshDebugEnabled()) {
+        std::string selector_list;
+        for (size_t i = 0; i < selectors.size(); ++i) {
+            if (i > 0)
+                selector_list += ", ";
+            selector_list += selectors[i].empty() ? "<default>" : selectors[i];
         }
-        if (!uvs.empty()) {
-            out_uv.push_back(uvs[idx * 2 + 0]);
-            out_uv.push_back(uvs[idx * 2 + 1]);
-        }
-        if (!colors.empty()) {
-            out_col.push_back(colors[idx * 4 + 0]);
-            out_col.push_back(colors[idx * 4 + 1]);
-            out_col.push_back(colors[idx * 4 + 2]);
-            out_col.push_back(colors[idx * 4 + 3]);
-        }
-    };
-
-    if (has_indices) {
-        for (size_t i = 0; i < indices.size(); ++i)
-            push_vertex(indices[i]);
-    } else {
-        for (size_t i = 0; i < positions.size() / 3; ++i)
-            push_vertex((uint32_t)i);
+        std::fprintf(stderr, "glTF mesh selectors for %s: %s\n", base_path.c_str(), selector_list.c_str());
     }
+
+    for (size_t sel_index = 0; sel_index < selectors.size(); ++sel_index) {
+        const std::string& selector = selectors[sel_index];
+        int mesh_index = FindMeshIndexByName(model, selector);
+        if (mesh_index < 0) {
+            if (error)
+                *error = selector.empty() ? "Mesh not found" : (std::string("Mesh not found: ") + selector);
+            return false;
+        }
+        if (MeshDebugEnabled()) {
+            std::fprintf(stderr, "  selector '%s' -> mesh[%d] '%s'\n",
+                         selector.empty() ? "<default>" : selector.c_str(),
+                         mesh_index,
+                         model.meshes[mesh_index].name.c_str());
+        }
+        if (model.meshes[mesh_index].primitives.empty()) {
+            if (error)
+                *error = "No mesh primitives";
+            return false;
+        }
+
+        const tinygltf::Primitive& prim = model.meshes[mesh_index].primitives[0];
+        auto it_pos = prim.attributes.find("POSITION");
+        if (it_pos == prim.attributes.end()) {
+            if (error)
+                *error = "Missing POSITION";
+            return false;
+        }
+
+        std::vector<float> positions;
+        if (!ReadAccessor(model, model.accessors[it_pos->second], &positions, 3))
+            return false;
+
+        std::vector<float> normals;
+        auto it_norm = prim.attributes.find("NORMAL");
+        if (it_norm != prim.attributes.end())
+            ReadAccessor(model, model.accessors[it_norm->second], &normals, 3);
+
+        std::vector<float> uvs;
+        auto it_uv = prim.attributes.find("TEXCOORD_0");
+        if (it_uv != prim.attributes.end()) {
+            if (ReadAccessor(model, model.accessors[it_uv->second], &uvs, 2))
+                any_uv = true;
+        }
+
+        std::vector<float> colors;
+        auto it_col = prim.attributes.find("COLOR_0");
+        if (it_col != prim.attributes.end())
+            ReadAccessor(model, model.accessors[it_col->second], &colors, 4);
+
+        std::vector<uint32_t> indices;
+        bool has_indices = (prim.indices >= 0);
+        if (has_indices)
+            ReadIndices(model, model.accessors[prim.indices], &indices);
+
+        auto push_vertex = [&](uint32_t idx) {
+            out_pos.push_back(positions[idx * 3 + 0]);
+            out_pos.push_back(positions[idx * 3 + 1]);
+            out_pos.push_back(positions[idx * 3 + 2]);
+            if (!normals.empty()) {
+                out_norm.push_back(normals[idx * 3 + 0]);
+                out_norm.push_back(normals[idx * 3 + 1]);
+                out_norm.push_back(normals[idx * 3 + 2]);
+            }
+            if (!uvs.empty()) {
+                out_uv.push_back(uvs[idx * 2 + 0]);
+                out_uv.push_back(uvs[idx * 2 + 1]);
+            }
+            if (!colors.empty()) {
+                out_col.push_back(colors[idx * 4 + 0]);
+                out_col.push_back(colors[idx * 4 + 1]);
+                out_col.push_back(colors[idx * 4 + 2]);
+                out_col.push_back(colors[idx * 4 + 3]);
+            }
+        };
+
+        if (has_indices) {
+            for (size_t i = 0; i < indices.size(); ++i)
+                push_vertex(indices[i]);
+        } else {
+            for (size_t i = 0; i < positions.size() / 3; ++i)
+                push_vertex((uint32_t)i);
+        }
+    }
+
+    if (any_uv)
+        out_mesh->has_uv = true;
 
     if (out_norm.empty()) {
         ComputeNormals(out_pos, &out_norm);

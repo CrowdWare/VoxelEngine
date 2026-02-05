@@ -37,6 +37,10 @@ bool LoadTileCatalog(const std::string& repo_root,
                      TileCatalog* out_catalog,
                      std::string* error_message);
 
+std::vector<TileDef> LoadTileDefinitions(const std::string& repo_root,
+                                         const std::string& tiles_root_rel,
+                                         std::string* error_message);
+
 bool PopulateTileResources(const std::string& repo_root,
                            const std::string& default_texture_rel,
                            std::vector<TileDef>* tiles,
