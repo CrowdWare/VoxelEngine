@@ -74,14 +74,22 @@ static bool EndsWith(const std::string& s, const std::string& suffix) {
 
 static std::string NormalizeTileModel(const std::string& model_in) {
     std::string model = model_in;
+    std::string fragment;
+    size_t hash = model.find('#');
+    if (hash != std::string::npos) {
+        fragment = model.substr(hash);
+        model = model.substr(0, hash);
+    }
     if (model.empty())
-        return "block.glb";
+        return "block.glb" + fragment;
     if (model.compare(0, 8, "texture:") == 0)
-        return "block.glb";
+        return "block.glb" + fragment;
     model = StripResPrefix(model);
     if (model.compare(0, 9, "../build/") == 0)
         model = model.substr(3);
-    return model.empty() ? "block.glb" : model;
+    if (model.empty())
+        return "block.glb" + fragment;
+    return model + fragment;
 }
 
 static std::string ResolveWorkspacePath(const std::string& repo_root, const std::string& rel) {
@@ -104,21 +112,28 @@ static std::string MapLegacyTexturePath(const std::string& path) {
 static std::string ResolveModelPath(const std::string& repo_root, const std::string& path) {
     if (path.empty())
         return path;
-    if (path[0] == '/' || path[0] == '\\')
-        return path;
-    if (path[0] == '.' || path.find('/') != std::string::npos || path.find('\\') != std::string::npos) {
-        std::string candidate = ResolveWorkspacePath(repo_root, path);
-        if (FileExists(candidate))
-            return candidate;
-        return path;
+    std::string base = path;
+    std::string fragment;
+    size_t hash = base.find('#');
+    if (hash != std::string::npos) {
+        fragment = base.substr(hash);
+        base = base.substr(0, hash);
     }
-    std::string candidate = ResolveWorkspacePath(repo_root, JoinPath("build/blocks_cache", path));
+    if (base[0] == '/' || base[0] == '\\')
+        return base + fragment;
+    if (base[0] == '.' || base.find('/') != std::string::npos || base.find('\\') != std::string::npos) {
+        std::string candidate = ResolveWorkspacePath(repo_root, base);
+        if (FileExists(candidate))
+            return candidate + fragment;
+        return base + fragment;
+    }
+    std::string candidate = ResolveWorkspacePath(repo_root, JoinPath("build/blocks_cache", base));
     if (FileExists(candidate))
-        return candidate;
-    candidate = ResolveWorkspacePath(repo_root, JoinPath("RaidBuilder/assets/blocks", path));
+        return candidate + fragment;
+    candidate = ResolveWorkspacePath(repo_root, JoinPath("RaidBuilder/assets/blocks", base));
     if (FileExists(candidate))
-        return candidate;
-    return path;
+        return candidate + fragment;
+    return base + fragment;
 }
 
 static int ComputeHeightBlocks(int height_cm, int scale_percent, int block_cm) {
@@ -193,6 +208,8 @@ static bool ParseTilesFile(const std::string& path,
                 tile.texture = value.string_value;
             else if (name == "model" && value.type == sml::PropertyValue::String)
                 tile.model = value.string_value;
+            else if (name == "animation" && value.type == sml::PropertyValue::String)
+                tile.animation = value.string_value;
             else if (name == "type" && value.type == sml::PropertyValue::String)
                 tile.type = value.string_value;
             else if (name == "material" && value.type == sml::PropertyValue::EnumType)
@@ -286,6 +303,8 @@ bool LoadTileCatalog(const std::string& repo_root,
     out_catalog->meshes.clear();
     out_catalog->mesh_has_uv.clear();
     out_catalog->texture_paths.clear();
+    out_catalog->animation_paths.clear();
+    out_catalog->animation_libraries.clear();
     out_catalog->index_by_key.clear();
 
     std::vector<TileDef> tiles = LoadTileDefinitions(repo_root, tiles_root_rel, error_message);
@@ -306,12 +325,16 @@ bool PopulateTileResources(const std::string& repo_root,
     out_catalog->meshes.clear();
     out_catalog->mesh_has_uv.clear();
     out_catalog->texture_paths.clear();
+    out_catalog->animation_paths.clear();
+    out_catalog->animation_libraries.clear();
     out_catalog->index_by_key.clear();
 
     std::vector<voxel::VoxelRenderer::MeshData> meshes;
     std::vector<bool> mesh_has_uv;
+    std::vector<GltfAnimationLibrary> animations;
     meshes.reserve(tiles->size());
     mesh_has_uv.reserve(tiles->size());
+    animations.reserve(tiles->size());
 
     for (size_t i = 0; i < tiles->size(); ++i) {
         std::string model = (*tiles)[i].model.empty() ? "block.glb" : (*tiles)[i].model;
@@ -336,6 +359,26 @@ bool PopulateTileResources(const std::string& repo_root,
             meshes.push_back(voxel::VoxelRenderer::MeshData());
             mesh_has_uv.push_back(false);
         }
+
+        GltfAnimationLibrary library;
+        std::string animation_path = StripResPrefix((*tiles)[i].animation);
+        if (!animation_path.empty())
+            animation_path = StripDotSlash(animation_path);
+        if (!animation_path.empty()) {
+            std::string resolved = ResolveWorkspacePath(repo_root, animation_path);
+            std::string animation_error;
+            if (!LoadGltfAnimationLibrary(resolved, &library, &animation_error)) {
+                if (!animation_error.empty())
+                    std::fprintf(stderr, "Failed to load animation %s: %s\n", resolved.c_str(), animation_error.c_str());
+                else
+                    std::fprintf(stderr, "Failed to load animation %s\n", resolved.c_str());
+                animation_path.clear();
+            } else {
+                animation_path = resolved;
+            }
+        }
+        animations.push_back(library);
+        (*tiles)[i].animation = animation_path;
     }
 
     std::vector<std::string> textures;
@@ -368,6 +411,10 @@ bool PopulateTileResources(const std::string& repo_root,
     out_catalog->meshes = meshes;
     out_catalog->mesh_has_uv = mesh_has_uv;
     out_catalog->texture_paths = textures;
+    out_catalog->animation_paths.reserve(tiles->size());
+    for (size_t i = 0; i < tiles->size(); ++i)
+        out_catalog->animation_paths.push_back((*tiles)[i].animation);
+    out_catalog->animation_libraries = animations;
     out_catalog->index_by_key = index_by_key;
     return true;
 }

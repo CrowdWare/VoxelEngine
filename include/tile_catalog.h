@@ -11,6 +11,7 @@ struct TileDef {
     std::string icon;
     std::string texture;
     std::string model;
+    std::string animation;
     std::string type = "block"; // block | prop
     int height_cm = 60;
     int scale_percent = 100;
@@ -25,6 +26,8 @@ struct TileCatalog {
     std::vector<voxel::VoxelRenderer::MeshData> meshes;
     std::vector<bool> mesh_has_uv;
     std::vector<std::string> texture_paths;
+    std::vector<std::string> animation_paths;
+    std::vector<GltfAnimationLibrary> animation_libraries;
     std::map<std::string, int> index_by_key;
 };
 

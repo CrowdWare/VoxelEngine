@@ -13,6 +13,43 @@
 
 #include <vector>
 #include <cmath>
+#include <map>
+
+struct AnimationCacheEntry {
+    GltfAnimationLibrary library;
+    std::string error;
+    bool loaded = false;
+};
+
+static std::map<std::string, AnimationCacheEntry> g_animation_cache;
+
+static void SplitPathFragment(const std::string& path, std::string* base, std::string* fragment) {
+    if (base)
+        base->clear();
+    if (fragment)
+        fragment->clear();
+    size_t hash = path.find('#');
+    if (hash == std::string::npos) {
+        if (base)
+            *base = path;
+        return;
+    }
+    if (base)
+        *base = path.substr(0, hash);
+    if (fragment)
+        *fragment = path.substr(hash + 1);
+}
+
+static int FindMeshIndexByName(const tinygltf::Model& model, const std::string& name) {
+    if (name.empty())
+        return 0;
+    for (size_t i = 0; i < model.meshes.size(); ++i) {
+        if (model.meshes[i].name == name)
+            return static_cast<int>(i);
+    }
+    return -1;
+}
+
 
 static bool ReadAccessor(const tinygltf::Model& model,
                          const tinygltf::Accessor& accessor,
@@ -125,11 +162,17 @@ bool LoadGltfMesh(const std::string& path, GltfMesh* out_mesh, std::string* erro
     out_mesh->mesh = voxel::VoxelRenderer::MeshData();
     out_mesh->has_uv = false;
 
+    std::string base_path;
+    std::string mesh_selector;
+    SplitPathFragment(path, &base_path, &mesh_selector);
+    if (base_path.empty())
+        base_path = path;
+
     tinygltf::TinyGLTF loader;
     tinygltf::Model model;
     std::string err;
     std::string warn;
-    bool ok = loader.LoadBinaryFromFile(&model, &err, &warn, path);
+    bool ok = loader.LoadBinaryFromFile(&model, &err, &warn, base_path);
     if (!warn.empty())
         warn.clear();
     if (!ok) {
@@ -137,13 +180,24 @@ bool LoadGltfMesh(const std::string& path, GltfMesh* out_mesh, std::string* erro
             *error = err.empty() ? "Failed to load glb" : err;
         return false;
     }
-    if (model.meshes.empty() || model.meshes[0].primitives.empty()) {
+    if (model.meshes.empty()) {
+        if (error)
+            *error = "No mesh primitives";
+        return false;
+    }
+    int mesh_index = FindMeshIndexByName(model, mesh_selector);
+    if (mesh_index < 0) {
+        if (error)
+            *error = std::string("Mesh not found: ") + mesh_selector;
+        return false;
+    }
+    if (model.meshes[mesh_index].primitives.empty()) {
         if (error)
             *error = "No mesh primitives";
         return false;
     }
 
-    const tinygltf::Primitive& prim = model.meshes[0].primitives[0];
+    const tinygltf::Primitive& prim = model.meshes[mesh_index].primitives[0];
     auto it_pos = prim.attributes.find("POSITION");
     if (it_pos == prim.attributes.end()) {
         if (error)
@@ -240,5 +294,88 @@ bool LoadGltfMesh(const std::string& path, GltfMesh* out_mesh, std::string* erro
     out_mesh->mesh.normals = out_norm;
     out_mesh->mesh.uvs = out_uv;
     out_mesh->mesh.colors = out_col;
+    return true;
+}
+
+static float SampleAnimationDuration(const tinygltf::Model& model, const tinygltf::Animation& anim) {
+    float duration = 0.0f;
+    for (const auto& channel : anim.channels) {
+        if (channel.sampler < 0 || channel.sampler >= static_cast<int>(anim.samplers.size()))
+            continue;
+        const tinygltf::AnimationSampler& sampler = anim.samplers[channel.sampler];
+        if (sampler.input < 0 || sampler.input >= static_cast<int>(model.accessors.size()))
+            continue;
+        const tinygltf::Accessor& accessor = model.accessors[sampler.input];
+        const tinygltf::BufferView& view = model.bufferViews[accessor.bufferView];
+        const tinygltf::Buffer& buffer = model.buffers[view.buffer];
+        const unsigned char* data = buffer.data.data() + view.byteOffset + accessor.byteOffset;
+        size_t stride = accessor.ByteStride(view);
+        if (stride == 0)
+            stride = sizeof(float);
+        if (accessor.count == 0)
+            continue;
+        const float* last = reinterpret_cast<const float*>(data + stride * (accessor.count - 1));
+        duration = std::max(duration, *last);
+    }
+    return duration;
+}
+
+bool LoadGltfAnimationLibrary(const std::string& path,
+                              GltfAnimationLibrary* out_library,
+                              std::string* error) {
+    if (!out_library)
+        return false;
+
+    std::string base_path;
+    std::string fragment;
+    SplitPathFragment(path, &base_path, &fragment);
+    if (base_path.empty())
+        base_path = path;
+
+    auto cache_it = g_animation_cache.find(base_path);
+    if (cache_it != g_animation_cache.end() && cache_it->second.loaded) {
+        *out_library = cache_it->second.library;
+        if (error)
+            *error = cache_it->second.error;
+        return cache_it->second.error.empty();
+    }
+
+    AnimationCacheEntry entry;
+    entry.loaded = true;
+
+    tinygltf::TinyGLTF loader;
+    tinygltf::Model model;
+    std::string err;
+    std::string warn;
+    bool ok = loader.LoadBinaryFromFile(&model, &err, &warn, base_path);
+    if (!warn.empty())
+        warn.clear();
+    if (!ok) {
+        entry.error = err.empty() ? "Failed to load glb" : err;
+        if (error)
+            *error = entry.error;
+        g_animation_cache[base_path] = entry;
+        return false;
+    }
+
+    if (model.animations.empty()) {
+        entry.error = "No animations";
+        if (error)
+            *error = entry.error;
+        g_animation_cache[base_path] = entry;
+        return false;
+    }
+
+    for (const auto& anim : model.animations) {
+        GltfAnimationClip clip;
+        clip.name = anim.name.empty() ? "default" : anim.name;
+        clip.duration = SampleAnimationDuration(model, anim);
+        entry.library.clips.push_back(clip);
+    }
+
+    *out_library = entry.library;
+    g_animation_cache[base_path] = entry;
+    if (error)
+        *error = entry.error;
     return true;
 }
