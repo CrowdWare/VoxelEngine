@@ -22,11 +22,14 @@ struct CharacterConfig {
     float jump_clearance = 0.2f;
     float block_size = 0.6f;
     float gravity = -9.81f;
+    bool can_toggle_gravity_mode = false;
+    bool can_toggle_collision = false;
 };
 
 struct CharacterInput {
     float accel_x = 0.0f;
     float accel_z = 0.0f;
+    float accel_y = 0.0f;
     bool jump = false;
     float jump_speed = 5.5f;
 };
@@ -41,6 +44,10 @@ public:
     void setPosition(const Vec3& pos);
     void setVelocity(const Vec3& vel);
     void setGravity(float gravity);
+    void setGravityEnabled(bool enabled);
+    void setCollisionEnabled(bool enabled);
+    bool gravityEnabled() const;
+    bool collisionEnabled() const;
 
     const Vec3& position() const;
     const Vec3& velocity() const;
@@ -61,6 +68,8 @@ private:
     Vec3 velocity_;
     bool grounded_ = false;
     float accumulator_ = 0.0f;
+    bool gravity_enabled_ = true;
+    bool collision_enabled_ = true;
 };
 
 } // namespace voxel

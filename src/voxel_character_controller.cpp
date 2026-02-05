@@ -33,6 +33,27 @@ void CharacterController::setGravity(float gravity) {
     config_.gravity = gravity;
 }
 
+void CharacterController::setGravityEnabled(bool enabled) {
+    gravity_enabled_ = enabled;
+    if (gravity_enabled_) {
+        return;
+    }
+    velocity_.y = 0.0f;
+    grounded_ = false;
+}
+
+void CharacterController::setCollisionEnabled(bool enabled) {
+    collision_enabled_ = enabled;
+}
+
+bool CharacterController::gravityEnabled() const {
+    return gravity_enabled_;
+}
+
+bool CharacterController::collisionEnabled() const {
+    return collision_enabled_;
+}
+
 const Vec3& CharacterController::position() const {
     return position_;
 }
@@ -57,8 +78,10 @@ void CharacterController::fixedUpdate(float dt, const CharacterInput& input) {
     bool was_grounded = grounded_;
     grounded_ = false;
     velocity_.x += input.accel_x * dt;
+    velocity_.y += input.accel_y * dt;
     velocity_.z += input.accel_z * dt;
-    velocity_.y += config_.gravity * dt;
+    if (gravity_enabled_)
+        velocity_.y += config_.gravity * dt;
     if (input.jump && was_grounded && hasHeadroom(config_.jump_clearance)) {
         velocity_.y = input.jump_speed;
     }
@@ -142,6 +165,8 @@ bool CharacterController::moveAxis(float delta, int axis, bool allow_step) {
 }
 
 bool CharacterController::overlapsSolid(const Vec3& min, const Vec3& max) const {
+    if (!collision_enabled_)
+        return false;
     if (!is_solid_)
         return false;
     const int min_x = FloorToInt(min.x / config_.block_size);
