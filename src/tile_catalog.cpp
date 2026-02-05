@@ -92,6 +92,15 @@ static std::string ResolveWorkspacePath(const std::string& repo_root, const std:
     return JoinPath(repo_root, rel);
 }
 
+static std::string MapLegacyTexturePath(const std::string& path) {
+    if (path.empty())
+        return path;
+    const std::string legacy_prefix = "assets/textures/";
+    if (path.compare(0, legacy_prefix.size(), legacy_prefix) == 0)
+        return "Assets/textures/" + path.substr(legacy_prefix.size());
+    return path;
+}
+
 static std::string ResolveModelPath(const std::string& repo_root, const std::string& path) {
     if (path.empty())
         return path;
@@ -335,13 +344,14 @@ bool PopulateTileResources(const std::string& repo_root,
         std::string tex = (*tiles)[i].texture.empty() ? default_texture_rel : (*tiles)[i].texture;
         tex = StripResPrefix(tex);
         tex = StripDotSlash(tex);
+        tex = MapLegacyTexturePath(tex);
         std::string resolved = ResolveWorkspacePath(repo_root, tex);
         if (!FileExists(resolved)) {
             std::string raidbuilder_tex = ResolveWorkspacePath(repo_root, JoinPath("RaidBuilder", tex));
             if (FileExists(raidbuilder_tex)) {
                 resolved = raidbuilder_tex;
             } else {
-                std::string fallback = ResolveWorkspacePath(repo_root, default_texture_rel);
+                std::string fallback = ResolveWorkspacePath(repo_root, MapLegacyTexturePath(default_texture_rel));
                 std::fprintf(stderr, "Missing tile texture: %s (tile '%s'), using %s\n",
                             resolved.c_str(), (*tiles)[i].key.c_str(), fallback.c_str());
                 resolved = fallback;

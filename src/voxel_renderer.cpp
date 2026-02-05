@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -288,9 +289,19 @@ void VoxelRenderer::copyBufferToImage(VkCommandBuffer cmd, VkBuffer buffer, VkIm
 
 bool VoxelRenderer::createTextureImage(const char* path, VkImage* out_image, VkDeviceMemory* out_memory, VkImageView* out_view) {
     int tex_w = 0, tex_h = 0, tex_comp = 0;
-    unsigned char* pixels = stbi_load(path, &tex_w, &tex_h, &tex_comp, 4);
-    if (!pixels)
-        return false;
+    unsigned char fallback_pixel[4] = {255, 0, 255, 255};
+    unsigned char* pixels = nullptr;
+    bool use_fallback = false;
+    if (path && path[0] != '\0')
+        pixels = stbi_load(path, &tex_w, &tex_h, &tex_comp, 4);
+    if (!pixels) {
+        use_fallback = true;
+        tex_w = 1;
+        tex_h = 1;
+        tex_comp = 4;
+        pixels = fallback_pixel;
+        std::fprintf(stderr, "Texture missing (%s) -> using fallback\n", path ? path : "<null>");
+    }
 
     VkDeviceSize image_size = (VkDeviceSize)tex_w * (VkDeviceSize)tex_h * 4;
     VkBuffer staging_buffer = VK_NULL_HANDLE;
@@ -302,7 +313,8 @@ bool VoxelRenderer::createTextureImage(const char* path, VkImage* out_image, VkD
     vkMapMemory(device_, staging_memory, 0, image_size, 0, &data);
     std::memcpy(data, pixels, (size_t)image_size);
     vkUnmapMemory(device_, staging_memory);
-    stbi_image_free(pixels);
+    if (!use_fallback)
+        stbi_image_free(pixels);
 
     VkImageCreateInfo image_info = {};
     image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
