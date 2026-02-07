@@ -470,121 +470,138 @@ bool LoadGltfMesh(const std::string& path, GltfMesh* out_mesh, std::string* erro
 
     for (size_t sel_index = 0; sel_index < selectors.size(); ++sel_index) {
         const std::string& selector = selectors[sel_index];
-        int mesh_index = FindMeshIndexByName(model, selector);
-        if (mesh_index < 0) {
-            if (error)
-                *error = selector.empty() ? "Mesh not found" : (std::string("Mesh not found: ") + selector);
-            return false;
-        }
-        if (MeshDebugEnabled()) {
-            std::fprintf(stderr, "  selector '%s' -> mesh[%d] '%s'\n",
-                         selector.empty() ? "<default>" : selector.c_str(),
-                         mesh_index,
-                         model.meshes[mesh_index].name.c_str());
-        }
-        if (model.meshes[mesh_index].primitives.empty()) {
-            if (error)
-                *error = "No mesh primitives";
-            return false;
+        std::vector<int> mesh_indices;
+        if (selector.empty()) {
+            mesh_indices.reserve(model.meshes.size());
+            for (size_t mi = 0; mi < model.meshes.size(); ++mi)
+                mesh_indices.push_back(static_cast<int>(mi));
+        } else {
+            int mesh_index = FindMeshIndexByName(model, selector);
+            if (mesh_index < 0) {
+                if (error)
+                    *error = std::string("Mesh not found: ") + selector;
+                return false;
+            }
+            mesh_indices.push_back(mesh_index);
         }
 
-        const tinygltf::Primitive& prim = model.meshes[mesh_index].primitives[0];
-        if (out_mesh->base_color_texture_path.empty()) {
-            std::string tex_path = ResolveBaseColorTexturePath(model, prim, base_path);
-            if (!tex_path.empty()) {
-                out_mesh->base_color_texture_path = tex_path;
-                std::fprintf(stderr, "glTF baseColor texture: %s\n", tex_path.c_str());
+        bool any_primitive_loaded = false;
+        for (size_t mi = 0; mi < mesh_indices.size(); ++mi) {
+            const int mesh_index = mesh_indices[mi];
+            if (mesh_index < 0 || mesh_index >= static_cast<int>(model.meshes.size()))
+                continue;
+            if (MeshDebugEnabled()) {
+                std::fprintf(stderr, "  selector '%s' -> mesh[%d] '%s'\n",
+                             selector.empty() ? "<all>" : selector.c_str(),
+                             mesh_index,
+                             model.meshes[mesh_index].name.c_str());
+            }
+            const tinygltf::Mesh& mesh = model.meshes[mesh_index];
+            if (mesh.primitives.empty())
+                continue;
+            for (size_t prim_i = 0; prim_i < mesh.primitives.size(); ++prim_i) {
+            const tinygltf::Primitive& prim = mesh.primitives[prim_i];
+            if (out_mesh->base_color_texture_path.empty()) {
+                std::string tex_path = ResolveBaseColorTexturePath(model, prim, base_path);
+                if (!tex_path.empty()) {
+                    out_mesh->base_color_texture_path = tex_path;
+                    std::fprintf(stderr, "glTF baseColor texture: %s\n", tex_path.c_str());
+                }
+            }
+            auto it_pos = prim.attributes.find("POSITION");
+            if (it_pos == prim.attributes.end())
+                continue;
+
+            std::vector<float> positions;
+            if (!ReadAccessor(model, model.accessors[it_pos->second], &positions, 3))
+                continue;
+
+            std::vector<float> normals;
+            auto it_norm = prim.attributes.find("NORMAL");
+            if (it_norm != prim.attributes.end())
+                ReadAccessor(model, model.accessors[it_norm->second], &normals, 3);
+
+            std::vector<float> uvs;
+            auto it_uv = prim.attributes.find("TEXCOORD_0");
+            if (it_uv != prim.attributes.end()) {
+                if (ReadAccessor(model, model.accessors[it_uv->second], &uvs, 2))
+                    any_uv = true;
+            }
+
+            std::vector<float> colors;
+            auto it_col = prim.attributes.find("COLOR_0");
+            if (it_col != prim.attributes.end())
+                ReadAccessor(model, model.accessors[it_col->second], &colors, 4);
+
+            std::vector<uint32_t> joints;
+            auto it_joints = prim.attributes.find("JOINTS_0");
+            if (it_joints != prim.attributes.end())
+                ReadAccessorUint4(model, model.accessors[it_joints->second], &joints);
+
+            std::vector<float> weights;
+            auto it_weights = prim.attributes.find("WEIGHTS_0");
+            if (it_weights != prim.attributes.end())
+                ReadAccessor(model, model.accessors[it_weights->second], &weights, 4);
+
+            std::vector<uint32_t> indices;
+            bool has_indices = (prim.indices >= 0);
+            if (has_indices)
+                ReadIndices(model, model.accessors[prim.indices], &indices);
+
+            auto push_vertex = [&](uint32_t idx) {
+                out_pos.push_back(positions[idx * 3 + 0]);
+                out_pos.push_back(positions[idx * 3 + 1]);
+                out_pos.push_back(positions[idx * 3 + 2]);
+                if (!normals.empty()) {
+                    out_norm.push_back(normals[idx * 3 + 0]);
+                    out_norm.push_back(normals[idx * 3 + 1]);
+                    out_norm.push_back(normals[idx * 3 + 2]);
+                }
+                if (!uvs.empty()) {
+                    out_uv.push_back(uvs[idx * 2 + 0]);
+                    out_uv.push_back(uvs[idx * 2 + 1]);
+                }
+                if (!colors.empty()) {
+                    out_col.push_back(colors[idx * 4 + 0]);
+                    out_col.push_back(colors[idx * 4 + 1]);
+                    out_col.push_back(colors[idx * 4 + 2]);
+                    out_col.push_back(colors[idx * 4 + 3]);
+                }
+                if (!joints.empty() && !weights.empty()) {
+                    out_joints.push_back(joints[idx * 4 + 0]);
+                    out_joints.push_back(joints[idx * 4 + 1]);
+                    out_joints.push_back(joints[idx * 4 + 2]);
+                    out_joints.push_back(joints[idx * 4 + 3]);
+                    out_weights.push_back(weights[idx * 4 + 0]);
+                    out_weights.push_back(weights[idx * 4 + 1]);
+                    out_weights.push_back(weights[idx * 4 + 2]);
+                    out_weights.push_back(weights[idx * 4 + 3]);
+                } else {
+                    out_joints.push_back(0);
+                    out_joints.push_back(0);
+                    out_joints.push_back(0);
+                    out_joints.push_back(0);
+                    out_weights.push_back(1.0f);
+                    out_weights.push_back(0.0f);
+                    out_weights.push_back(0.0f);
+                    out_weights.push_back(0.0f);
+                }
+            };
+
+            if (has_indices) {
+                for (size_t i = 0; i < indices.size(); ++i)
+                    push_vertex(indices[i]);
+            } else {
+                for (size_t i = 0; i < positions.size() / 3; ++i)
+                    push_vertex((uint32_t)i);
+            }
+                any_primitive_loaded = true;
             }
         }
-        auto it_pos = prim.attributes.find("POSITION");
-        if (it_pos == prim.attributes.end()) {
+        if (!any_primitive_loaded) {
             if (error)
                 *error = "Missing POSITION";
             return false;
-        }
-
-        std::vector<float> positions;
-        if (!ReadAccessor(model, model.accessors[it_pos->second], &positions, 3))
-            return false;
-
-        std::vector<float> normals;
-        auto it_norm = prim.attributes.find("NORMAL");
-        if (it_norm != prim.attributes.end())
-            ReadAccessor(model, model.accessors[it_norm->second], &normals, 3);
-
-        std::vector<float> uvs;
-        auto it_uv = prim.attributes.find("TEXCOORD_0");
-        if (it_uv != prim.attributes.end()) {
-            if (ReadAccessor(model, model.accessors[it_uv->second], &uvs, 2))
-                any_uv = true;
-        }
-
-        std::vector<float> colors;
-        auto it_col = prim.attributes.find("COLOR_0");
-        if (it_col != prim.attributes.end())
-            ReadAccessor(model, model.accessors[it_col->second], &colors, 4);
-
-        std::vector<uint32_t> joints;
-        auto it_joints = prim.attributes.find("JOINTS_0");
-        if (it_joints != prim.attributes.end())
-            ReadAccessorUint4(model, model.accessors[it_joints->second], &joints);
-
-        std::vector<float> weights;
-        auto it_weights = prim.attributes.find("WEIGHTS_0");
-        if (it_weights != prim.attributes.end())
-            ReadAccessor(model, model.accessors[it_weights->second], &weights, 4);
-
-        std::vector<uint32_t> indices;
-        bool has_indices = (prim.indices >= 0);
-        if (has_indices)
-            ReadIndices(model, model.accessors[prim.indices], &indices);
-
-        auto push_vertex = [&](uint32_t idx) {
-            out_pos.push_back(positions[idx * 3 + 0]);
-            out_pos.push_back(positions[idx * 3 + 1]);
-            out_pos.push_back(positions[idx * 3 + 2]);
-            if (!normals.empty()) {
-                out_norm.push_back(normals[idx * 3 + 0]);
-                out_norm.push_back(normals[idx * 3 + 1]);
-                out_norm.push_back(normals[idx * 3 + 2]);
-            }
-            if (!uvs.empty()) {
-                out_uv.push_back(uvs[idx * 2 + 0]);
-                out_uv.push_back(uvs[idx * 2 + 1]);
-            }
-            if (!colors.empty()) {
-                out_col.push_back(colors[idx * 4 + 0]);
-                out_col.push_back(colors[idx * 4 + 1]);
-                out_col.push_back(colors[idx * 4 + 2]);
-                out_col.push_back(colors[idx * 4 + 3]);
-            }
-            if (!joints.empty() && !weights.empty()) {
-                out_joints.push_back(joints[idx * 4 + 0]);
-                out_joints.push_back(joints[idx * 4 + 1]);
-                out_joints.push_back(joints[idx * 4 + 2]);
-                out_joints.push_back(joints[idx * 4 + 3]);
-                out_weights.push_back(weights[idx * 4 + 0]);
-                out_weights.push_back(weights[idx * 4 + 1]);
-                out_weights.push_back(weights[idx * 4 + 2]);
-                out_weights.push_back(weights[idx * 4 + 3]);
-            } else {
-                out_joints.push_back(0);
-                out_joints.push_back(0);
-                out_joints.push_back(0);
-                out_joints.push_back(0);
-                out_weights.push_back(1.0f);
-                out_weights.push_back(0.0f);
-                out_weights.push_back(0.0f);
-                out_weights.push_back(0.0f);
-            }
-        };
-
-        if (has_indices) {
-            for (size_t i = 0; i < indices.size(); ++i)
-                push_vertex(indices[i]);
-        } else {
-            for (size_t i = 0; i < positions.size() / 3; ++i)
-                push_vertex((uint32_t)i);
         }
     }
 

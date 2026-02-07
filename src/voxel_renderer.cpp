@@ -17,6 +17,7 @@
  *  along with VoxelEngine.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+
 #include "voxel_renderer.h"
 #include "gltf_loader.h"
 
@@ -208,6 +209,12 @@ static VoxelRenderer::Mat4 mat4ScaleInternal(float x, float y, float z) {
     m.m[10] = z;
     m.m[15] = 1.0f;
     return m;
+}
+
+static float BlockScaleMultiplierPercent(int scale_percent) {
+    if (scale_percent <= 0)
+        scale_percent = 100;
+    return static_cast<float>(scale_percent) / 100.0f;
 }
 
 uint32_t VoxelRenderer::findMemoryType(uint32_t type_filter, VkMemoryPropertyFlags properties) const {
@@ -614,10 +621,10 @@ bool VoxelRenderer::init(VkDevice device,
         return false;
 
     VkPipelineRasterizationStateCreateInfo raster_skinned = raster;
-    // Skinned glTF meshes use a different winding than our block meshes.
-    // Keep back-face culling enabled (prevents "see-through" look without depth),
-    // but switch front-face for skinned rendering only.
-    raster_skinned.cullMode = VK_CULL_MODE_BACK_BIT;
+    // Skinned glTF meshes can contain mixed/animated winding (e.g. mirrored transforms),
+    // which may cull valid body parts (reported as missing head/face). Disable culling
+    // for skinned rendering to keep characters complete.
+    raster_skinned.cullMode = VK_CULL_MODE_NONE;
     raster_skinned.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     VkGraphicsPipelineCreateInfo pipeline_info_skinned = pipeline_info;
     pipeline_info_skinned.pRasterizationState = &raster_skinned;
@@ -1068,7 +1075,6 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
     vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &ground_pc);
     vkCmdDraw(cmd, ground_vertex_count_, 1, 0, 0);
 
-    Mat4 scale = mat4ScaleInternal(block_scale_, block_scale_, block_scale_);
     float* skin_palette_mapped = nullptr;
     bool skin_palette_is_mapped = false;
     uint32_t skinned_draw_slot = 0;
@@ -1090,6 +1096,7 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
 
         for (size_t i = 0; i < draw_items.size(); ++i) {
             const Block& block = blocks_[draw_items[i].index];
+            const float block_scale_mul = BlockScaleMultiplierPercent(block.scale_percent);
             VkBuffer vb = cube_buffer_;
             uint32_t vcount = cube_vertex_count_;
             MeshBuffer* mesh_ptr = nullptr;
@@ -1104,7 +1111,7 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
             vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &offset);
             float draw_y = block.y;
             if (mesh_ptr && mesh_ptr->is_skinned)
-                draw_y += (mesh_ptr->ground_offset_y - 0.5f) * block_scale_;
+                draw_y += (mesh_ptr->ground_offset_y - 0.5f) * block_scale_ * block_scale_mul;
             Mat4 translate = mat4Translate(block.x, draw_y, block.z);
             Mat4 rot_x = mat4RotateX(ToRadians(block.rot_x_deg));
             float yaw_deg = block.rot_y_deg;
@@ -1115,6 +1122,9 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
             // Apply yaw (Y) last so turning left/right doesn't change which face is up.
             // With column vectors, the right-most rotation is applied first.
             Mat4 rotate = mat4Multiply(rot_y, mat4Multiply(rot_x, rot_z));
+            Mat4 scale = mat4ScaleInternal(block_scale_ * block_scale_mul,
+                                           block_scale_ * block_scale_mul,
+                                           block_scale_ * block_scale_mul);
             Mat4 model = mat4Multiply(translate, mat4Multiply(rotate, scale));
             if (mesh_ptr && mesh_ptr->is_skinned) {
                 mesh_ptr->animation_time += dt;
@@ -1237,6 +1247,7 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
         }
     } else {
         vkCmdBindVertexBuffers(cmd, 0, 1, &cube_buffer_, &offset);
+        Mat4 scale = mat4ScaleInternal(block_scale_, block_scale_, block_scale_);
         Mat4 translate = mat4Translate(0.0f, 0.5f, 0.0f);
         Mat4 model = mat4Multiply(translate, scale);
         PushConstants pc = {};
@@ -1597,13 +1608,16 @@ bool VoxelRenderer::pickRect(uint32_t x, uint32_t y, uint32_t width, uint32_t he
                            camera_pos_[0] + fx, camera_pos_[1] + fy, camera_pos_[2] + fz,
                            0.0f, 1.0f, 0.0f);
 
-    Mat4 scale = mat4ScaleInternal(block_scale_, block_scale_, block_scale_);
     for (size_t i = 0; i < blocks_.size(); ++i) {
         Mat4 translate = mat4Translate(blocks_[i].x, blocks_[i].y, blocks_[i].z);
         Mat4 rot_x = mat4RotateX(ToRadians(blocks_[i].rot_x_deg));
         Mat4 rot_y = mat4RotateY(ToRadians(blocks_[i].rot_y_deg));
         Mat4 rot_z = mat4RotateZ(ToRadians(blocks_[i].rot_z_deg));
         Mat4 rotate = mat4Multiply(rot_y, mat4Multiply(rot_x, rot_z));
+        const float block_scale_mul = BlockScaleMultiplierPercent(blocks_[i].scale_percent);
+        Mat4 scale = mat4ScaleInternal(block_scale_ * block_scale_mul,
+                                       block_scale_ * block_scale_mul,
+                                       block_scale_ * block_scale_mul);
         Mat4 model = mat4Multiply(translate, mat4Multiply(rotate, scale));
         PickPush pc = {};
         pc.mvp = mat4Multiply(proj, mat4Multiply(view, model));

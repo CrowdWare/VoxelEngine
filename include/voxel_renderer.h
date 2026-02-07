@@ -39,6 +39,7 @@ public:
         int tex_index = 0;
         std::string key;
         int mesh_index = -1;
+        int scale_percent = 100;
     };
 
     struct MeshData {
