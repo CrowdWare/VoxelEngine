@@ -433,7 +433,7 @@ bool VoxelRenderer::createVertexBuffer(const Vertex* vertices, size_t count, VkB
 static const uint32_t kMaxBlockTextures = 16;
 static const uint32_t kMaxSkinPaletteJoints = 256;
 static const uint32_t kMaxSkinnedDrawsPerFrame = 64;
-static const bool kDisableSkinnedAnimationForDebug = true;
+static const bool kDisableSkinnedAnimationForDebug = false;
 static const float kSkinnedYawOffsetDeg = 180.0f;
 
 bool VoxelRenderer::init(VkDevice device,
