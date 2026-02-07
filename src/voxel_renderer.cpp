@@ -18,6 +18,7 @@
  */
 
 #include "voxel_renderer.h"
+#include "gltf_loader.h"
 
 #include <algorithm>
 #include <cmath>
@@ -45,6 +46,8 @@ VoxelRenderer::VoxelRenderer()
     , descriptor_pool_(VK_NULL_HANDLE)
     , descriptor_set_(VK_NULL_HANDLE)
     , texture_sampler_(VK_NULL_HANDLE)
+    , skin_palette_buffer_(VK_NULL_HANDLE)
+    , skin_palette_memory_(VK_NULL_HANDLE)
     , ground_texture_image_(VK_NULL_HANDLE)
     , ground_texture_memory_(VK_NULL_HANDLE)
     , ground_texture_view_(VK_NULL_HANDLE)
@@ -453,7 +456,7 @@ bool VoxelRenderer::init(VkDevice device,
     if (!createShaderModule(pick_fragment_shader_path, &pick_frag_shader_))
         return false;
 
-    VkDescriptorSetLayoutBinding sampler_bindings[2] = {};
+    VkDescriptorSetLayoutBinding sampler_bindings[3] = {};
     sampler_bindings[0].binding = 0;
     sampler_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     sampler_bindings[0].descriptorCount = 1;
@@ -462,10 +465,14 @@ bool VoxelRenderer::init(VkDevice device,
     sampler_bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     sampler_bindings[1].descriptorCount = kMaxBlockTextures;
     sampler_bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    sampler_bindings[2].binding = 2;
+    sampler_bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    sampler_bindings[2].descriptorCount = 1;
+    sampler_bindings[2].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 
     VkDescriptorSetLayoutCreateInfo desc_layout_info = {};
     desc_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    desc_layout_info.bindingCount = 2;
+    desc_layout_info.bindingCount = 3;
     desc_layout_info.pBindings = sampler_bindings;
     if (vkCreateDescriptorSetLayout(device_, &desc_layout_info, nullptr, &descriptor_set_layout_) != VK_SUCCESS)
         return false;
@@ -485,7 +492,7 @@ bool VoxelRenderer::init(VkDevice device,
     binding.stride = sizeof(Vertex);
     binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription attributes[4] = {};
+    VkVertexInputAttributeDescription attributes[6] = {};
     attributes[0].binding = 0;
     attributes[0].location = 0;
     attributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -502,12 +509,20 @@ bool VoxelRenderer::init(VkDevice device,
     attributes[3].location = 3;
     attributes[3].format = VK_FORMAT_R32G32_SFLOAT;
     attributes[3].offset = offsetof(Vertex, uv);
+    attributes[4].binding = 0;
+    attributes[4].location = 4;
+    attributes[4].format = VK_FORMAT_R32G32B32A32_UINT;
+    attributes[4].offset = offsetof(Vertex, joints);
+    attributes[5].binding = 0;
+    attributes[5].location = 5;
+    attributes[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributes[5].offset = offsetof(Vertex, weights);
 
     VkPipelineVertexInputStateCreateInfo vertex_input = {};
     vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vertex_input.vertexBindingDescriptionCount = 1;
     vertex_input.pVertexBindingDescriptions = &binding;
-    vertex_input.vertexAttributeDescriptionCount = 4;
+    vertex_input.vertexAttributeDescriptionCount = 6;
     vertex_input.pVertexAttributeDescriptions = attributes;
 
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {};
@@ -553,7 +568,7 @@ bool VoxelRenderer::init(VkDevice device,
     VkPushConstantRange push_range = {};
     push_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     push_range.offset = 0;
-    push_range.size = sizeof(Mat4) + sizeof(float) * 4;
+    push_range.size = sizeof(Mat4) + sizeof(float) * 4 + sizeof(uint32_t) * 4;
 
     VkPipelineLayoutCreateInfo pipe_layout_info = {};
     pipe_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -631,16 +646,36 @@ bool VoxelRenderer::init(VkDevice device,
     if (vkCreateSampler(device_, &sampler_info, nullptr, &texture_sampler_) != VK_SUCCESS)
         return false;
 
-    VkDescriptorPoolSize pool_size = {};
-    pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    pool_size.descriptorCount = 1 + kMaxBlockTextures;
+    VkDescriptorPoolSize pool_sizes_desc[2] = {};
+    pool_sizes_desc[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    pool_sizes_desc[0].descriptorCount = 1 + kMaxBlockTextures;
+    pool_sizes_desc[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    pool_sizes_desc[1].descriptorCount = 1;
     VkDescriptorPoolCreateInfo pool_info_desc = {};
     pool_info_desc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool_info_desc.poolSizeCount = 1;
-    pool_info_desc.pPoolSizes = &pool_size;
+    pool_info_desc.poolSizeCount = 2;
+    pool_info_desc.pPoolSizes = pool_sizes_desc;
     pool_info_desc.maxSets = 1;
     if (vkCreateDescriptorPool(device_, &pool_info_desc, nullptr, &descriptor_pool_) != VK_SUCCESS)
         return false;
+
+    if (!createBuffer(sizeof(float) * 16 * 256,
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                      &skin_palette_buffer_,
+                      &skin_palette_memory_))
+        return false;
+    {
+        float* mapped = nullptr;
+        vkMapMemory(device_, skin_palette_memory_, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void**>(&mapped));
+        for (int i = 0; i < 256; ++i) {
+            float* m = mapped + i * 16;
+            for (int k = 0; k < 16; ++k)
+                m[k] = 0.0f;
+            m[0] = m[5] = m[10] = m[15] = 1.0f;
+        }
+        vkUnmapMemory(device_, skin_palette_memory_);
+    }
 
     VkDescriptorSetAllocateInfo alloc_info_desc = {};
     alloc_info_desc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -661,7 +696,12 @@ bool VoxelRenderer::init(VkDevice device,
         image_infos[1 + i].sampler = texture_sampler_;
     }
 
-    VkWriteDescriptorSet writes[2] = {};
+    VkDescriptorBufferInfo skin_info = {};
+    skin_info.buffer = skin_palette_buffer_;
+    skin_info.offset = 0;
+    skin_info.range = VK_WHOLE_SIZE;
+
+    VkWriteDescriptorSet writes[3] = {};
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = descriptor_set_;
     writes[0].dstBinding = 0;
@@ -674,7 +714,13 @@ bool VoxelRenderer::init(VkDevice device,
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[1].descriptorCount = kMaxBlockTextures;
     writes[1].pImageInfo = &image_infos[1];
-    vkUpdateDescriptorSets(device_, 2, writes, 0, nullptr);
+    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[2].dstSet = descriptor_set_;
+    writes[2].dstBinding = 2;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[2].descriptorCount = 1;
+    writes[2].pBufferInfo = &skin_info;
+    vkUpdateDescriptorSets(device_, 3, writes, 0, nullptr);
 
     VkAttachmentDescription color_attachment = {};
     color_attachment.format = VK_FORMAT_R32_UINT;
@@ -874,6 +920,10 @@ void VoxelRenderer::shutdown() {
         vkDestroyDescriptorSetLayout(device_, descriptor_set_layout_, nullptr);
     if (texture_sampler_)
         vkDestroySampler(device_, texture_sampler_, nullptr);
+    if (skin_palette_buffer_)
+        vkDestroyBuffer(device_, skin_palette_buffer_, nullptr);
+    if (skin_palette_memory_)
+        vkFreeMemory(device_, skin_palette_memory_, nullptr);
     if (ground_texture_view_)
         vkDestroyImageView(device_, ground_texture_view_, nullptr);
     if (ground_texture_image_)
@@ -924,6 +974,18 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
     if (!pipeline_ || width <= 0 || height <= 0)
         return;
 
+    float dt = 0.0f;
+    const auto now = std::chrono::steady_clock::now();
+    if (has_last_render_time_) {
+        dt = std::chrono::duration<float>(now - last_render_time_).count();
+        if (dt < 0.0f)
+            dt = 0.0f;
+        if (dt > 0.25f)
+            dt = 0.25f;
+    }
+    last_render_time_ = now;
+    has_last_render_time_ = true;
+
     VkViewport viewport = {};
     viewport.x = 0.0f;
     viewport.y = 0.0f;
@@ -963,6 +1025,7 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
     struct PushConstants {
         Mat4 mvp;
         float tint[4];
+        uint32_t skin[4];
     };
     PushConstants ground_pc = {};
     ground_pc.mvp = mat4Multiply(proj, mat4Multiply(view, ground_model));
@@ -970,10 +1033,16 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
     ground_pc.tint[1] = 1.0f;
     ground_pc.tint[2] = 1.0f;
     ground_pc.tint[3] = -1.0f;
+    ground_pc.skin[0] = 0;
+    ground_pc.skin[1] = 0;
+    ground_pc.skin[2] = 0;
+    ground_pc.skin[3] = 0;
     vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &ground_pc);
     vkCmdDraw(cmd, ground_vertex_count_, 1, 0, 0);
 
     Mat4 scale = mat4ScaleInternal(block_scale_, block_scale_, block_scale_);
+    float* skin_palette_mapped = nullptr;
+    bool skin_palette_is_mapped = false;
     if (!blocks_.empty()) {
         struct DrawItem {
             size_t index;
@@ -994,11 +1063,13 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
             const Block& block = blocks_[draw_items[i].index];
             VkBuffer vb = cube_buffer_;
             uint32_t vcount = cube_vertex_count_;
+            MeshBuffer* mesh_ptr = nullptr;
             if (block.mesh_index >= 0 && (size_t)block.mesh_index < block_meshes_.size()) {
-                const MeshBuffer& mesh = block_meshes_[block.mesh_index];
+                MeshBuffer& mesh = block_meshes_[block.mesh_index];
                 if (mesh.buffer && mesh.vertex_count > 0) {
                     vb = mesh.buffer;
                     vcount = mesh.vertex_count;
+                    mesh_ptr = &mesh;
                 }
             }
             vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &offset);
@@ -1006,6 +1077,12 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
             Mat4 rot_x = mat4RotateX(ToRadians(block.rot_x_deg));
             Mat4 rot_y = mat4RotateY(ToRadians(block.rot_y_deg));
             Mat4 rot_z = mat4RotateZ(ToRadians(block.rot_z_deg));
+            if (mesh_ptr && mesh_ptr->is_skinned) {
+                mesh_ptr->animation_time += dt;
+                const float cycle = (mesh_ptr->animation_duration > 0.001f) ? mesh_ptr->animation_duration : 1.0f;
+                if (mesh_ptr->animation_time > cycle)
+                    mesh_ptr->animation_time = std::fmod(mesh_ptr->animation_time, cycle);
+            }
             // Apply yaw (Y) last so turning left/right doesn't change which face is up.
             // With column vectors, the right-most rotation is applied first.
             Mat4 rotate = mat4Multiply(rot_y, mat4Multiply(rot_x, rot_z));
@@ -1017,6 +1094,41 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
             pc.tint[1] = selected ? 1.0f : 1.0f;
             pc.tint[2] = selected ? 0.1f : 1.0f;
             pc.tint[3] = (float)block.tex_index;
+            pc.skin[0] = 0;
+            pc.skin[1] = 0;
+            pc.skin[2] = 0u;
+            pc.skin[3] = 0;
+
+            if (mesh_ptr && mesh_ptr->is_skinned &&
+                mesh_ptr->joint_count > 0 &&
+                mesh_ptr->frame_count > 0 &&
+                !mesh_ptr->skin_palette.empty()) {
+                if (!skin_palette_is_mapped) {
+                    if (vkMapMemory(device_, skin_palette_memory_, 0, VK_WHOLE_SIZE, 0,
+                                    reinterpret_cast<void**>(&skin_palette_mapped)) == VK_SUCCESS) {
+                        skin_palette_is_mapped = true;
+                    }
+                }
+                if (skin_palette_is_mapped && skin_palette_mapped) {
+                    uint32_t frame_index = 0;
+                    if (mesh_ptr->frame_count > 1 && mesh_ptr->animation_duration > 0.0001f) {
+                        float phase = mesh_ptr->animation_time / mesh_ptr->animation_duration;
+                        if (phase < 0.0f)
+                            phase = 0.0f;
+                        phase = std::fmod(phase, 1.0f);
+                        frame_index = static_cast<uint32_t>(phase * (float)mesh_ptr->frame_count);
+                        if (frame_index >= mesh_ptr->frame_count)
+                            frame_index = mesh_ptr->frame_count - 1;
+                    }
+                    const uint32_t max_joints_gpu = 256u;
+                    const uint32_t joints_to_copy = std::min(mesh_ptr->joint_count, max_joints_gpu);
+                    const size_t src_offset = (static_cast<size_t>(frame_index) * mesh_ptr->joint_count) * 16u;
+                    std::memcpy(skin_palette_mapped,
+                                mesh_ptr->skin_palette.data() + src_offset,
+                                sizeof(float) * 16u * joints_to_copy);
+                    pc.skin[2] = 1u;
+                }
+            }
             vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &pc);
             vkCmdDraw(cmd, vcount, 1, 0, 0);
         }
@@ -1030,9 +1142,16 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
         pc.tint[1] = 1.0f;
         pc.tint[2] = 1.0f;
         pc.tint[3] = 0.0f;
+        pc.skin[0] = 0;
+        pc.skin[1] = 0;
+        pc.skin[2] = 0;
+        pc.skin[3] = 0;
         vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &pc);
         vkCmdDraw(cmd, cube_vertex_count_, 1, 0, 0);
     }
+
+    if (skin_palette_is_mapped)
+        vkUnmapMemory(device_, skin_palette_memory_);
 }
 
 void VoxelRenderer::setCamera(float x, float y, float z, float yaw_radians, float pitch_radians) {
@@ -1100,11 +1219,68 @@ void VoxelRenderer::setBlockMeshes(const std::vector<MeshData>& meshes) {
                 verts[v].color[1] = 1.0f;
                 verts[v].color[2] = 1.0f;
             }
+            if (mesh.joints.size() >= (v + 1) * 4) {
+                verts[v].joints[0] = mesh.joints[v * 4 + 0];
+                verts[v].joints[1] = mesh.joints[v * 4 + 1];
+                verts[v].joints[2] = mesh.joints[v * 4 + 2];
+                verts[v].joints[3] = mesh.joints[v * 4 + 3];
+            } else {
+                verts[v].joints[0] = 0;
+                verts[v].joints[1] = 0;
+                verts[v].joints[2] = 0;
+                verts[v].joints[3] = 0;
+            }
+            if (mesh.weights.size() >= (v + 1) * 4) {
+                verts[v].weights[0] = mesh.weights[v * 4 + 0];
+                verts[v].weights[1] = mesh.weights[v * 4 + 1];
+                verts[v].weights[2] = mesh.weights[v * 4 + 2];
+                verts[v].weights[3] = mesh.weights[v * 4 + 3];
+            } else {
+                verts[v].weights[0] = 1.0f;
+                verts[v].weights[1] = 0.0f;
+                verts[v].weights[2] = 0.0f;
+                verts[v].weights[3] = 0.0f;
+            }
         }
 
         MeshBuffer buffer = {};
         if (createVertexBuffer(verts.data(), verts.size(), &buffer.buffer, &buffer.memory)) {
             buffer.vertex_count = (uint32_t)verts.size();
+            buffer.is_skinned = mesh.is_skinned;
+            buffer.source_model_path = mesh.source_model_path;
+            buffer.source_animation_path = mesh.source_animation_path;
+            buffer.animation_time = 0.0f;
+            if (buffer.is_skinned) {
+                GltfSkinningFrames frames;
+                std::string skin_error;
+                if (LoadGltfSkinningFrames(buffer.source_model_path,
+                                           buffer.source_animation_path,
+                                           &frames,
+                                           &skin_error)) {
+                    buffer.joint_count = frames.joint_count;
+                    buffer.frame_count = frames.frame_count;
+                    buffer.animation_duration = frames.duration;
+                    buffer.skin_palette = std::move(frames.palettes);
+                    std::fprintf(stderr,
+                                 "skinned renderer: mesh[%zu] skin frames loaded joints=%u frames=%u duration=%.3fs\n",
+                                 i,
+                                 buffer.joint_count,
+                                 buffer.frame_count,
+                                 buffer.animation_duration);
+                } else {
+                    if (!skin_error.empty()) {
+                        std::fprintf(stderr,
+                                     "skinned renderer: failed skinning load for mesh[%zu] model='%s' anim='%s': %s\n",
+                                     i,
+                                     buffer.source_model_path.c_str(),
+                                     buffer.source_animation_path.c_str(),
+                                     skin_error.c_str());
+                    }
+                    buffer.joint_count = 0;
+                    buffer.frame_count = 0;
+                    buffer.skin_palette.clear();
+                }
+            }
             block_meshes_[i] = buffer;
         }
     }

@@ -157,6 +157,34 @@ static bool WriteF32Vec(std::ostream& out, const std::vector<float>& data) {
     return out.good();
 }
 
+static bool WriteU32Vec(std::ostream& out, const std::vector<uint32_t>& data) {
+    if (!WriteU32(out, static_cast<uint32_t>(data.size())))
+        return false;
+    if (!data.empty())
+        out.write(reinterpret_cast<const char*>(data.data()), sizeof(uint32_t) * data.size());
+    return out.good();
+}
+
+static bool WriteString(std::ostream& out, const std::string& value) {
+    if (!WriteU32(out, static_cast<uint32_t>(value.size())))
+        return false;
+    if (!value.empty())
+        out.write(value.data(), static_cast<std::streamsize>(value.size()));
+    return out.good();
+}
+
+static bool ReadString(std::istream& in, std::string* value) {
+    if (!value)
+        return false;
+    uint32_t size = 0;
+    if (!ReadU32(in, &size))
+        return false;
+    value->assign(size, '\0');
+    if (size > 0)
+        in.read(&(*value)[0], static_cast<std::streamsize>(size));
+    return in.good();
+}
+
 static bool ReadF32Vec(std::istream& in, std::vector<float>* data) {
     uint32_t size = 0;
     if (!ReadU32(in, &size))
@@ -164,6 +192,16 @@ static bool ReadF32Vec(std::istream& in, std::vector<float>* data) {
     data->assign(size, 0.0f);
     if (size > 0)
         in.read(reinterpret_cast<char*>(data->data()), sizeof(float) * size);
+    return in.good();
+}
+
+static bool ReadU32Vec(std::istream& in, std::vector<uint32_t>* data) {
+    uint32_t size = 0;
+    if (!ReadU32(in, &size))
+        return false;
+    data->assign(size, 0u);
+    if (size > 0)
+        in.read(reinterpret_cast<char*>(data->data()), sizeof(uint32_t) * size);
     return in.good();
 }
 
@@ -186,7 +224,7 @@ static bool LoadMeshCache(const std::string& repo_root,
             std::fprintf(stderr, "Mesh cache invalid header: %s\n", cache_path.c_str());
         return false;
     }
-    if (magic != 0x4853454D || version != 1)
+    if (magic != 0x4853454D || (version != 1 && version != 2 && version != 3 && version != 4))
         return false;
     uint32_t has_uv = 0;
     if (!ReadU32(in, &has_uv))
@@ -199,6 +237,21 @@ static bool LoadMeshCache(const std::string& repo_root,
         return false;
     if (!ReadF32Vec(in, &out_mesh->mesh.colors))
         return false;
+    if (version >= 3) {
+        if (!ReadU32Vec(in, &out_mesh->mesh.joints))
+            return false;
+        if (!ReadF32Vec(in, &out_mesh->mesh.weights))
+            return false;
+    } else {
+        out_mesh->mesh.joints.clear();
+        out_mesh->mesh.weights.clear();
+    }
+    if (version >= 2) {
+        if (!ReadString(in, &out_mesh->base_color_texture_path))
+            return false;
+    } else {
+        out_mesh->base_color_texture_path.clear();
+    }
     out_mesh->has_uv = (has_uv != 0);
     if (MeshCacheDebugEnabled())
         std::fprintf(stderr, "Mesh cache hit: %s\n", cache_path.c_str());
@@ -222,12 +275,15 @@ static void SaveMeshCache(const std::string& repo_root,
         return;
     }
     WriteU32(out, 0x4853454D); // MESH
-    WriteU32(out, 1);
+    WriteU32(out, 4);
     WriteU32(out, mesh.has_uv ? 1u : 0u);
     WriteF32Vec(out, mesh.mesh.positions);
     WriteF32Vec(out, mesh.mesh.normals);
     WriteF32Vec(out, mesh.mesh.uvs);
     WriteF32Vec(out, mesh.mesh.colors);
+    WriteU32Vec(out, mesh.mesh.joints);
+    WriteF32Vec(out, mesh.mesh.weights);
+    WriteString(out, mesh.base_color_texture_path);
     if (MeshCacheDebugEnabled())
         std::fprintf(stderr, "Mesh cache write: %s\n", cache_path.c_str());
 }
@@ -351,6 +407,8 @@ static bool ParseTilesFile(const std::string& path,
         TileDef tile;
         std::vector<TileDef> tiles;
         std::string category;
+        bool invalid = false;
+        std::string invalid_message;
 
         explicit TilesHandler(const std::string& cat) : category(cat) {}
 
@@ -388,9 +446,19 @@ static bool ParseTilesFile(const std::string& path,
         void endElement(const std::string& name) override {
             if (name == "Tile") {
                 if (!tile.key.empty()) {
-                    tile.category = category;
-                    tile.height_blocks = ComputeHeightBlocks(tile.height_cm, tile.scale_percent, 60);
-                    tiles.push_back(tile);
+                    if (tile.material == "skinned") {
+                        if (tile.model.empty()) {
+                            invalid = true;
+                            invalid_message = "Tile '" + tile.key + "' uses material: skinned but has no model";
+                        }
+                        // texture is block-specific; for skinned tiles glTF is source of truth.
+                        tile.texture.clear();
+                    }
+                    if (!invalid) {
+                        tile.category = category;
+                        tile.height_blocks = ComputeHeightBlocks(tile.height_cm, tile.scale_percent, 60);
+                        tiles.push_back(tile);
+                    }
                 }
                 tile = TileDef();
             }
@@ -404,6 +472,7 @@ static bool ParseTilesFile(const std::string& path,
         sml::SmlSaxParser parser(text);
         parser.registerEnumValue("material", "texture");
         parser.registerEnumValue("material", "vertex");
+        parser.registerEnumValue("material", "skinned");
         parser.registerEnumValue("placement", "ground");
         parser.registerEnumValue("placement", "wall");
         parser.registerEnumValue("placement", "ceiling");
@@ -411,6 +480,12 @@ static bool ParseTilesFile(const std::string& path,
     } catch (const sml::SmlParseException& e) {
         if (error_message)
             *error_message = e.what();
+        return false;
+    }
+
+    if (handler.invalid) {
+        if (error_message)
+            *error_message = handler.invalid_message.empty() ? "Invalid tile definition" : handler.invalid_message;
         return false;
     }
 
@@ -504,6 +579,10 @@ bool PopulateTileResources(const std::string& repo_root,
     auto mesh_start = std::chrono::steady_clock::now();
     std::map<std::string, GltfMesh> mesh_cache;
     for (size_t i = 0; i < tiles->size(); ++i) {
+        std::string animation_path = StripResPrefix((*tiles)[i].animation);
+        if (!animation_path.empty())
+            animation_path = StripDotSlash(animation_path);
+
         std::string model = (*tiles)[i].model.empty() ? "block.glb" : (*tiles)[i].model;
         if (model.compare(0, 8, "texture:") == 0) {
             std::string tex_from_model = StripResPrefix(model.substr(8));
@@ -529,6 +608,16 @@ bool PopulateTileResources(const std::string& repo_root,
                 mesh_ok = LoadGltfMesh(model_path, &mesh, &mesh_error);
         }
         if (mesh_ok) {
+            if ((*tiles)[i].material == "skinned" && (*tiles)[i].texture.empty() && !mesh.base_color_texture_path.empty()) {
+                (*tiles)[i].texture = mesh.base_color_texture_path;
+                std::fprintf(stderr,
+                             "skinned tile '%s': using glTF baseColor texture %s\n",
+                             (*tiles)[i].key.c_str(),
+                             (*tiles)[i].texture.c_str());
+            }
+            mesh.mesh.is_skinned = ((*tiles)[i].material == "skinned");
+            mesh.mesh.source_model_path = model_path;
+            mesh.mesh.source_animation_path = animation_path;
             meshes.push_back(mesh.mesh);
             mesh_has_uv.push_back(mesh.has_uv);
             if (!loaded_from_cache && mesh_error.empty())
@@ -544,9 +633,6 @@ bool PopulateTileResources(const std::string& repo_root,
         }
 
         GltfAnimationLibrary library;
-        std::string animation_path = StripResPrefix((*tiles)[i].animation);
-        if (!animation_path.empty())
-            animation_path = StripDotSlash(animation_path);
         if (!animation_path.empty()) {
             std::string resolved = ResolveWorkspacePath(repo_root, animation_path);
             std::string animation_error;
@@ -558,8 +644,16 @@ bool PopulateTileResources(const std::string& repo_root,
                 animation_path.clear();
             } else {
                 animation_path = resolved;
+                if ((*tiles)[i].material == "skinned") {
+                    std::fprintf(stderr,
+                                 "skinned tile '%s': animation library loaded (%zu clips)\n",
+                                 (*tiles)[i].key.c_str(),
+                                 library.clips.size());
+                }
             }
         }
+        if (i < meshes.size())
+            meshes[i].source_animation_path = animation_path;
         animations.push_back(library);
         (*tiles)[i].animation = animation_path;
     }

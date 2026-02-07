@@ -23,6 +23,7 @@
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <string>
+#include <chrono>
 
 namespace voxel {
 
@@ -45,6 +46,11 @@ public:
         std::vector<float> normals;
         std::vector<float> uvs;
         std::vector<float> colors;
+        std::vector<uint32_t> joints; // 4 indices per vertex
+        std::vector<float> weights;   // 4 weights per vertex
+        bool is_skinned = false;
+        std::string source_model_path;
+        std::string source_animation_path;
     };
 
     VoxelRenderer();
@@ -74,6 +80,8 @@ private:
         float color[3];
         float normal[3];
         float uv[2];
+        uint32_t joints[4];
+        float weights[4];
     };
     struct BlockTexture {
         VkImage image = VK_NULL_HANDLE;
@@ -84,6 +92,14 @@ private:
         VkBuffer buffer = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
         uint32_t vertex_count = 0;
+        bool is_skinned = false;
+        std::string source_model_path;
+        std::string source_animation_path;
+        float animation_time = 0.0f;
+        float animation_duration = 0.0f;
+        uint32_t joint_count = 0;
+        uint32_t frame_count = 0;
+        std::vector<float> skin_palette; // mat4 array, column-major
     };
 
 public:
@@ -124,6 +140,8 @@ private:
     VkDescriptorPool descriptor_pool_;
     VkDescriptorSet descriptor_set_;
     VkSampler texture_sampler_;
+    VkBuffer skin_palette_buffer_;
+    VkDeviceMemory skin_palette_memory_;
     VkImage ground_texture_image_;
     VkDeviceMemory ground_texture_memory_;
     VkImageView ground_texture_view_;
@@ -135,6 +153,8 @@ private:
     uint32_t ground_vertex_count_;
     uint32_t cube_vertex_count_;
     std::vector<MeshBuffer> block_meshes_;
+    std::chrono::steady_clock::time_point last_render_time_;
+    bool has_last_render_time_ = false;
     float camera_pos_[3];
     float camera_yaw_;
     float camera_pitch_;
