@@ -93,6 +93,7 @@ private:
         VkDeviceMemory memory = VK_NULL_HANDLE;
         uint32_t vertex_count = 0;
         std::vector<Vertex> cpu_vertices;
+        float ground_offset_y = 0.0f;
         bool is_skinned = false;
         std::string source_model_path;
         std::string source_animation_path;

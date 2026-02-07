@@ -1102,7 +1102,10 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
                 }
             }
             vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &offset);
-            Mat4 translate = mat4Translate(block.x, block.y, block.z);
+            float draw_y = block.y;
+            if (mesh_ptr && mesh_ptr->is_skinned)
+                draw_y += (mesh_ptr->ground_offset_y - 0.5f) * block_scale_;
+            Mat4 translate = mat4Translate(block.x, draw_y, block.z);
             Mat4 rot_x = mat4RotateX(ToRadians(block.rot_x_deg));
             float yaw_deg = block.rot_y_deg;
             if (mesh_ptr && mesh_ptr->is_skinned)
@@ -1349,6 +1352,13 @@ void VoxelRenderer::setBlockMeshes(const std::vector<MeshData>& meshes) {
             buffer.vertex_count = (uint32_t)verts.size();
             buffer.cpu_vertices = verts;
             buffer.is_skinned = mesh.is_skinned;
+            if (buffer.is_skinned && !verts.empty()) {
+                float min_y = verts[0].pos[1];
+                for (size_t vi = 1; vi < verts.size(); ++vi)
+                    min_y = std::min(min_y, verts[vi].pos[1]);
+                // Move skinned mesh so its lowest point rests on block Y.
+                buffer.ground_offset_y = -min_y;
+            }
             buffer.source_model_path = mesh.source_model_path;
             buffer.source_animation_path = mesh.source_animation_path;
             buffer.animation_time = 0.0f;
