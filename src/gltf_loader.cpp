@@ -16,6 +16,7 @@
 #include <map>
 #include <unordered_map>
 #include <algorithm>
+#include <functional>
 #include <cstdio>
 #include <cstdlib>
 #include <cctype>
@@ -88,6 +89,25 @@ static std::string ToLowerCopy(const std::string& text) {
     std::string out = text;
     for (size_t i = 0; i < out.size(); ++i)
         out[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(out[i])));
+    return out;
+}
+
+static std::string CanonicalNodeName(const std::string& name) {
+    std::string s = ToLowerCopy(name);
+    // Strip common namespace separators used by DCC/Mixamo exports.
+    size_t colon = s.find_last_of(':');
+    if (colon != std::string::npos && colon + 1 < s.size())
+        s = s.substr(colon + 1);
+    size_t pipe = s.find_last_of('|');
+    if (pipe != std::string::npos && pipe + 1 < s.size())
+        s = s.substr(pipe + 1);
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        if (std::isalnum(c))
+            out.push_back(static_cast<char>(c));
+    }
     return out;
 }
 
@@ -1000,14 +1020,22 @@ bool LoadGltfSkinningFrames(const std::string& model_path,
     }
 
     std::unordered_map<std::string, int> model_node_by_name;
+    std::unordered_map<std::string, int> model_node_by_canonical_name;
     for (size_t i = 0; i < model.nodes.size(); ++i) {
-        if (!model.nodes[i].name.empty())
+        if (!model.nodes[i].name.empty()) {
             model_node_by_name[model.nodes[i].name] = static_cast<int>(i);
+            const std::string canonical = CanonicalNodeName(model.nodes[i].name);
+            if (!canonical.empty() && model_node_by_canonical_name.find(canonical) == model_node_by_canonical_name.end())
+                model_node_by_canonical_name[canonical] = static_cast<int>(i);
+        }
     }
 
     const tinygltf::Animation& anim = anim_model.animations[0];
     std::vector<NodeAnimTracks> tracks(model.nodes.size());
     float duration = SampleAnimationDuration(anim_model, anim);
+    int mapped_by_name = 0;
+    int mapped_by_canonical_name = 0;
+    int skipped_unmapped = 0;
     for (size_t ci = 0; ci < anim.channels.size(); ++ci) {
         const tinygltf::AnimationChannel& ch = anim.channels[ci];
         if (ch.sampler < 0 || ch.sampler >= static_cast<int>(anim.samplers.size()))
@@ -1025,11 +1053,21 @@ bool LoadGltfSkinningFrames(const std::string& model_path,
             auto it = model_node_by_name.find(n);
             if (it != model_node_by_name.end())
                 model_node = it->second;
-            else if (ch.target_node < static_cast<int>(model.nodes.size()))
-                model_node = ch.target_node;
+            if (model_node < 0) {
+                const std::string canonical = CanonicalNodeName(n);
+                auto it2 = model_node_by_canonical_name.find(canonical);
+                if (it2 != model_node_by_canonical_name.end()) {
+                    model_node = it2->second;
+                    mapped_by_canonical_name += 1;
+                }
+            }
+            if (model_node >= 0)
+                mapped_by_name += 1;
         }
-        if (model_node < 0 || model_node >= static_cast<int>(tracks.size()))
+        if (model_node < 0 || model_node >= static_cast<int>(tracks.size())) {
+            skipped_unmapped += 1;
             continue;
+        }
 
         std::vector<float> in_times;
         if (!ReadAccessor(anim_model, anim_model.accessors[sampler.input], &in_times, 1))
@@ -1056,6 +1094,14 @@ bool LoadGltfSkinningFrames(const std::string& model_path,
             tracks[model_node].scale.times = in_times;
             tracks[model_node].scale.values = out_vals;
         }
+    }
+
+    if (&anim_model != &model && skipped_unmapped > 0) {
+        std::fprintf(stderr,
+                     "Animation remap: skipped %d channels with no node-name match (mapped_by_name=%d canonical=%d)\n",
+                     skipped_unmapped,
+                     mapped_by_name,
+                     mapped_by_canonical_name);
     }
 
     const float sample_fps = 30.0f;
@@ -1085,13 +1131,21 @@ bool LoadGltfSkinningFrames(const std::string& model_path,
             local[ni] = ComposeTRS(tt, rr, ss);
         }
 
-        for (size_t ni = 0; ni < model.nodes.size(); ++ni) {
-            int p = parents[ni];
-            if (p >= 0)
-                global[ni] = Mat4Multiply(global[(size_t)p], local[ni]);
-            else
+        std::vector<uint8_t> global_ready(model.nodes.size(), 0u);
+        std::function<void(size_t)> compute_global = [&](size_t ni) {
+            if (global_ready[ni])
+                return;
+            const int p = parents[ni];
+            if (p >= 0) {
+                compute_global(static_cast<size_t>(p));
+                global[ni] = Mat4Multiply(global[static_cast<size_t>(p)], local[ni]);
+            } else {
                 global[ni] = local[ni];
-        }
+            }
+            global_ready[ni] = 1u;
+        };
+        for (size_t ni = 0; ni < model.nodes.size(); ++ni)
+            compute_global(ni);
 
         for (size_t ji = 0; ji < skin.joints.size(); ++ji) {
             const int node_index = skin.joints[ji];

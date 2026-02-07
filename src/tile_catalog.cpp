@@ -103,12 +103,8 @@ static bool MeshLoadTimingEnabled() {
 }
 
 static bool MeshCacheEnabled() {
-    const char* value = std::getenv("MESH_CACHE");
-    if (!value)
-        return true;
-    std::string v(value);
-    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return (char)std::tolower(c); });
-    return v == "1" || v == "true" || v == "yes" || v == "on";
+    // Temporarily force-disable mesh cache until skinned texture mapping issue is fully resolved.
+    return false;
 }
 
 static bool MeshCacheDebugEnabled() {
@@ -224,8 +220,15 @@ static bool LoadMeshCache(const std::string& repo_root,
             std::fprintf(stderr, "Mesh cache invalid header: %s\n", cache_path.c_str());
         return false;
     }
-    if (magic != 0x4853454D || (version != 1 && version != 2 && version != 3 && version != 4))
+    if (magic != 0x4853454D || version != 4) {
+        if (MeshCacheDebugEnabled()) {
+            std::fprintf(stderr,
+                         "Mesh cache stale/unsupported version (got=%u, want=4): %s\n",
+                         version,
+                         cache_path.c_str());
+        }
         return false;
+    }
     uint32_t has_uv = 0;
     if (!ReadU32(in, &has_uv))
         return false;
@@ -604,6 +607,32 @@ bool PopulateTileResources(const std::string& repo_root,
         } else {
             loaded_from_cache = LoadMeshCache(repo_root, model_path, &mesh);
             mesh_ok = loaded_from_cache;
+
+            if (mesh_ok && loaded_from_cache && (*tiles)[i].material == "skinned" &&
+                mesh.base_color_texture_path.empty()) {
+                std::fprintf(stderr,
+                             "skinned tile '%s': cache entry has no baseColor metadata, reloading glTF '%s'\n",
+                             (*tiles)[i].key.c_str(),
+                             model_path.c_str());
+
+                GltfMesh refreshed_mesh;
+                std::string reload_error;
+                if (LoadGltfMesh(model_path, &refreshed_mesh, &reload_error)) {
+                    mesh = refreshed_mesh;
+                    loaded_from_cache = false;
+                    mesh_ok = true;
+                    std::fprintf(stderr,
+                                 "skinned tile '%s': refreshed mesh metadata from glTF\n",
+                                 (*tiles)[i].key.c_str());
+                } else {
+                    std::fprintf(stderr,
+                                 "skinned tile '%s': failed to refresh mesh metadata from glTF '%s': %s\n",
+                                 (*tiles)[i].key.c_str(),
+                                 model_path.c_str(),
+                                 reload_error.empty() ? "unknown error" : reload_error.c_str());
+                }
+            }
+
             if (!mesh_ok)
                 mesh_ok = LoadGltfMesh(model_path, &mesh, &mesh_error);
         }
@@ -668,6 +697,11 @@ bool PopulateTileResources(const std::string& repo_root,
     textures.reserve(tiles->size());
     for (size_t i = 0; i < tiles->size(); ++i) {
         std::string tex = (*tiles)[i].texture.empty() ? default_texture_rel : (*tiles)[i].texture;
+        if ((*tiles)[i].material == "skinned" && (*tiles)[i].texture.empty()) {
+            std::fprintf(stderr,
+                         "skinned tile '%s': no texture resolved from glTF, falling back to default texture\n",
+                         (*tiles)[i].key.c_str());
+        }
         tex = StripResPrefix(tex);
         tex = StripDotSlash(tex);
         tex = MapLegacyTexturePath(tex);

@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,7 @@ VoxelRenderer::VoxelRenderer()
     , render_pass_(VK_NULL_HANDLE)
     , pipeline_layout_(VK_NULL_HANDLE)
     , pipeline_(VK_NULL_HANDLE)
+    , pipeline_skinned_(VK_NULL_HANDLE)
     , vert_shader_(VK_NULL_HANDLE)
     , frag_shader_(VK_NULL_HANDLE)
     , descriptor_set_layout_(VK_NULL_HANDLE)
@@ -428,7 +430,11 @@ bool VoxelRenderer::createVertexBuffer(const Vertex* vertices, size_t count, VkB
     return true;
 }
 
-static const uint32_t kMaxBlockTextures = 8;
+static const uint32_t kMaxBlockTextures = 16;
+static const uint32_t kMaxSkinPaletteJoints = 256;
+static const uint32_t kMaxSkinnedDrawsPerFrame = 64;
+static const bool kDisableSkinnedAnimationForDebug = true;
+static const float kSkinnedYawOffsetDeg = 180.0f;
 
 bool VoxelRenderer::init(VkDevice device,
                          VkPhysicalDevice physical_device,
@@ -549,6 +555,14 @@ bool VoxelRenderer::init(VkDevice device,
     multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
+    VkPipelineDepthStencilStateCreateInfo depth_state = {};
+    depth_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depth_state.depthTestEnable = VK_TRUE;
+    depth_state.depthWriteEnable = VK_TRUE;
+    depth_state.depthCompareOp = VK_COMPARE_OP_LESS;
+    depth_state.depthBoundsTestEnable = VK_FALSE;
+    depth_state.stencilTestEnable = VK_FALSE;
+
     VkPipelineColorBlendAttachmentState color_blend_attachment = {};
     color_blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
@@ -589,6 +603,7 @@ bool VoxelRenderer::init(VkDevice device,
     pipeline_info.pViewportState = &viewport_state;
     pipeline_info.pRasterizationState = &raster;
     pipeline_info.pMultisampleState = &multisample;
+    pipeline_info.pDepthStencilState = &depth_state;
     pipeline_info.pColorBlendState = &color_blend;
     pipeline_info.pDynamicState = &dynamic_state;
     pipeline_info.layout = pipeline_layout_;
@@ -596,6 +611,17 @@ bool VoxelRenderer::init(VkDevice device,
     pipeline_info.subpass = 0;
 
     if (vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline_) != VK_SUCCESS)
+        return false;
+
+    VkPipelineRasterizationStateCreateInfo raster_skinned = raster;
+    // Skinned glTF meshes use a different winding than our block meshes.
+    // Keep back-face culling enabled (prevents "see-through" look without depth),
+    // but switch front-face for skinned rendering only.
+    raster_skinned.cullMode = VK_CULL_MODE_BACK_BIT;
+    raster_skinned.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    VkGraphicsPipelineCreateInfo pipeline_info_skinned = pipeline_info;
+    pipeline_info_skinned.pRasterizationState = &raster_skinned;
+    if (vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipeline_info_skinned, nullptr, &pipeline_skinned_) != VK_SUCCESS)
         return false;
 
     VkCommandPoolCreateInfo pool_info = {};
@@ -659,7 +685,7 @@ bool VoxelRenderer::init(VkDevice device,
     if (vkCreateDescriptorPool(device_, &pool_info_desc, nullptr, &descriptor_pool_) != VK_SUCCESS)
         return false;
 
-    if (!createBuffer(sizeof(float) * 16 * 256,
+    if (!createBuffer(sizeof(float) * 16 * kMaxSkinPaletteJoints * kMaxSkinnedDrawsPerFrame,
                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                       &skin_palette_buffer_,
@@ -668,7 +694,7 @@ bool VoxelRenderer::init(VkDevice device,
     {
         float* mapped = nullptr;
         vkMapMemory(device_, skin_palette_memory_, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void**>(&mapped));
-        for (int i = 0; i < 256; ++i) {
+        for (uint32_t i = 0; i < kMaxSkinPaletteJoints * kMaxSkinnedDrawsPerFrame; ++i) {
             float* m = mapped + i * 16;
             for (int k = 0; k < 16; ++k)
                 m[k] = 0.0f;
@@ -776,13 +802,13 @@ bool VoxelRenderer::init(VkDevice device,
     pick_stages[1].module = pick_frag_shader_;
     pick_stages[1].pName = "main";
 
-    VkPipelineDepthStencilStateCreateInfo depth_state = {};
-    depth_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    depth_state.depthTestEnable = VK_TRUE;
-    depth_state.depthWriteEnable = VK_TRUE;
-    depth_state.depthCompareOp = VK_COMPARE_OP_LESS;
-    depth_state.depthBoundsTestEnable = VK_FALSE;
-    depth_state.stencilTestEnable = VK_FALSE;
+    VkPipelineDepthStencilStateCreateInfo pick_depth_state = {};
+    pick_depth_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    pick_depth_state.depthTestEnable = VK_TRUE;
+    pick_depth_state.depthWriteEnable = VK_TRUE;
+    pick_depth_state.depthCompareOp = VK_COMPARE_OP_LESS;
+    pick_depth_state.depthBoundsTestEnable = VK_FALSE;
+    pick_depth_state.stencilTestEnable = VK_FALSE;
 
     VkPipelineColorBlendAttachmentState pick_blend = {};
     pick_blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT;
@@ -814,7 +840,7 @@ bool VoxelRenderer::init(VkDevice device,
     pick_pipe.pViewportState = &viewport_state;
     pick_pipe.pRasterizationState = &raster;
     pick_pipe.pMultisampleState = &multisample;
-    pick_pipe.pDepthStencilState = &depth_state;
+    pick_pipe.pDepthStencilState = &pick_depth_state;
     pick_pipe.pColorBlendState = &pick_color_blend;
     pick_pipe.pDynamicState = &dynamic_state;
     pick_pipe.layout = pick_pipeline_layout_;
@@ -908,6 +934,8 @@ void VoxelRenderer::shutdown() {
     block_meshes_.clear();
     if (pipeline_)
         vkDestroyPipeline(device_, pipeline_, nullptr);
+    if (pipeline_skinned_)
+        vkDestroyPipeline(device_, pipeline_skinned_, nullptr);
     if (pipeline_layout_)
         vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
     if (vert_shader_)
@@ -1000,7 +1028,6 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
     scissor.extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
     if (descriptor_set_ != VK_NULL_HANDLE) {
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_, 0, 1, &descriptor_set_, 0, nullptr);
     }
@@ -1037,12 +1064,14 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
     ground_pc.skin[1] = 0;
     ground_pc.skin[2] = 0;
     ground_pc.skin[3] = 0;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
     vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &ground_pc);
     vkCmdDraw(cmd, ground_vertex_count_, 1, 0, 0);
 
     Mat4 scale = mat4ScaleInternal(block_scale_, block_scale_, block_scale_);
     float* skin_palette_mapped = nullptr;
     bool skin_palette_is_mapped = false;
+    uint32_t skinned_draw_slot = 0;
     if (!blocks_.empty()) {
         struct DrawItem {
             size_t index;
@@ -1075,18 +1104,74 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
             vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &offset);
             Mat4 translate = mat4Translate(block.x, block.y, block.z);
             Mat4 rot_x = mat4RotateX(ToRadians(block.rot_x_deg));
-            Mat4 rot_y = mat4RotateY(ToRadians(block.rot_y_deg));
+            float yaw_deg = block.rot_y_deg;
+            if (mesh_ptr && mesh_ptr->is_skinned)
+                yaw_deg += kSkinnedYawOffsetDeg;
+            Mat4 rot_y = mat4RotateY(ToRadians(yaw_deg));
             Mat4 rot_z = mat4RotateZ(ToRadians(block.rot_z_deg));
+            // Apply yaw (Y) last so turning left/right doesn't change which face is up.
+            // With column vectors, the right-most rotation is applied first.
+            Mat4 rotate = mat4Multiply(rot_y, mat4Multiply(rot_x, rot_z));
+            Mat4 model = mat4Multiply(translate, mat4Multiply(rotate, scale));
             if (mesh_ptr && mesh_ptr->is_skinned) {
                 mesh_ptr->animation_time += dt;
                 const float cycle = (mesh_ptr->animation_duration > 0.001f) ? mesh_ptr->animation_duration : 1.0f;
                 if (mesh_ptr->animation_time > cycle)
                     mesh_ptr->animation_time = std::fmod(mesh_ptr->animation_time, cycle);
+
+                // Main pass currently has no depth attachment; keep skinned mesh
+                // visually stable by sorting triangles back-to-front per draw.
+                if (!mesh_ptr->cpu_vertices.empty() &&
+                    mesh_ptr->cpu_vertices.size() == static_cast<size_t>(vcount) &&
+                    (vcount % 3u) == 0u &&
+                    mesh_ptr->memory != VK_NULL_HANDLE) {
+                    const uint32_t tri_count = vcount / 3u;
+                    std::vector<uint32_t> tri_order(tri_count);
+                    std::iota(tri_order.begin(), tri_order.end(), 0u);
+
+                    auto transform_point = [&](const Mat4& m, const float p[3], float out_p[3]) {
+                        out_p[0] = m.m[0] * p[0] + m.m[4] * p[1] + m.m[8] * p[2] + m.m[12];
+                        out_p[1] = m.m[1] * p[0] + m.m[5] * p[1] + m.m[9] * p[2] + m.m[13];
+                        out_p[2] = m.m[2] * p[0] + m.m[6] * p[1] + m.m[10] * p[2] + m.m[14];
+                    };
+
+                    std::vector<float> tri_dist2(tri_count, 0.0f);
+                    for (uint32_t ti = 0; ti < tri_count; ++ti) {
+                        const Vertex& a = mesh_ptr->cpu_vertices[ti * 3u + 0u];
+                        const Vertex& b = mesh_ptr->cpu_vertices[ti * 3u + 1u];
+                        const Vertex& c = mesh_ptr->cpu_vertices[ti * 3u + 2u];
+                        float wa[3], wb[3], wc[3];
+                        transform_point(model, a.pos, wa);
+                        transform_point(model, b.pos, wb);
+                        transform_point(model, c.pos, wc);
+                        const float cx = (wa[0] + wb[0] + wc[0]) / 3.0f;
+                        const float cy = (wa[1] + wb[1] + wc[1]) / 3.0f;
+                        const float cz = (wa[2] + wb[2] + wc[2]) / 3.0f;
+                        const float dx = cx - camera_pos_[0];
+                        const float dy = cy - camera_pos_[1];
+                        const float dz = cz - camera_pos_[2];
+                        tri_dist2[ti] = dx * dx + dy * dy + dz * dz;
+                    }
+
+                    std::sort(tri_order.begin(), tri_order.end(),
+                              [&](uint32_t lhs, uint32_t rhs) { return tri_dist2[lhs] > tri_dist2[rhs]; });
+
+                    std::vector<Vertex> sorted_vertices;
+                    sorted_vertices.reserve(mesh_ptr->cpu_vertices.size());
+                    for (uint32_t oi = 0; oi < tri_count; ++oi) {
+                        const uint32_t src_tri = tri_order[oi];
+                        sorted_vertices.push_back(mesh_ptr->cpu_vertices[src_tri * 3u + 0u]);
+                        sorted_vertices.push_back(mesh_ptr->cpu_vertices[src_tri * 3u + 1u]);
+                        sorted_vertices.push_back(mesh_ptr->cpu_vertices[src_tri * 3u + 2u]);
+                    }
+
+                    void* mapped = nullptr;
+                    if (vkMapMemory(device_, mesh_ptr->memory, 0, sizeof(Vertex) * sorted_vertices.size(), 0, &mapped) == VK_SUCCESS) {
+                        std::memcpy(mapped, sorted_vertices.data(), sizeof(Vertex) * sorted_vertices.size());
+                        vkUnmapMemory(device_, mesh_ptr->memory);
+                    }
+                }
             }
-            // Apply yaw (Y) last so turning left/right doesn't change which face is up.
-            // With column vectors, the right-most rotation is applied first.
-            Mat4 rotate = mat4Multiply(rot_y, mat4Multiply(rot_x, rot_z));
-            Mat4 model = mat4Multiply(translate, mat4Multiply(rotate, scale));
             PushConstants pc = {};
             pc.mvp = mat4Multiply(proj, mat4Multiply(view, model));
             bool selected = (draw_items[i].index < selected_flags_.size() && selected_flags_[draw_items[i].index] != 0);
@@ -1098,6 +1183,12 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
             pc.skin[1] = 0;
             pc.skin[2] = 0u;
             pc.skin[3] = 0;
+
+            if (mesh_ptr && mesh_ptr->is_skinned) {
+                // Keep character shading/UV path for skinned materials even when
+                // animation sampling is disabled for debug T-pose.
+                pc.skin[2] = 1u;
+            }
 
             if (mesh_ptr && mesh_ptr->is_skinned &&
                 mesh_ptr->joint_count > 0 &&
@@ -1120,15 +1211,24 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
                         if (frame_index >= mesh_ptr->frame_count)
                             frame_index = mesh_ptr->frame_count - 1;
                     }
-                    const uint32_t max_joints_gpu = 256u;
-                    const uint32_t joints_to_copy = std::min(mesh_ptr->joint_count, max_joints_gpu);
+                    const uint32_t joints_to_copy = std::min(mesh_ptr->joint_count, kMaxSkinPaletteJoints);
                     const size_t src_offset = (static_cast<size_t>(frame_index) * mesh_ptr->joint_count) * 16u;
-                    std::memcpy(skin_palette_mapped,
+                    const uint32_t slot = std::min(skinned_draw_slot, kMaxSkinnedDrawsPerFrame - 1u);
+                    const uint32_t dst_joint_base = slot * kMaxSkinPaletteJoints;
+                    std::memcpy(skin_palette_mapped + static_cast<size_t>(dst_joint_base) * 16u,
                                 mesh_ptr->skin_palette.data() + src_offset,
                                 sizeof(float) * 16u * joints_to_copy);
+                    pc.skin[0] = dst_joint_base;
+                    pc.skin[1] = 1u;
                     pc.skin[2] = 1u;
+                    if (skinned_draw_slot + 1u < kMaxSkinnedDrawsPerFrame)
+                        skinned_draw_slot += 1u;
                 }
             }
+            VkPipeline draw_pipeline = (mesh_ptr && mesh_ptr->is_skinned && pipeline_skinned_ != VK_NULL_HANDLE)
+                                           ? pipeline_skinned_
+                                           : pipeline_;
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, draw_pipeline);
             vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &pc);
             vkCmdDraw(cmd, vcount, 1, 0, 0);
         }
@@ -1146,6 +1246,7 @@ void VoxelRenderer::render(VkCommandBuffer cmd, int width, int height) {
         pc.skin[1] = 0;
         pc.skin[2] = 0;
         pc.skin[3] = 0;
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
         vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &pc);
         vkCmdDraw(cmd, cube_vertex_count_, 1, 0, 0);
     }
@@ -1246,11 +1347,12 @@ void VoxelRenderer::setBlockMeshes(const std::vector<MeshData>& meshes) {
         MeshBuffer buffer = {};
         if (createVertexBuffer(verts.data(), verts.size(), &buffer.buffer, &buffer.memory)) {
             buffer.vertex_count = (uint32_t)verts.size();
+            buffer.cpu_vertices = verts;
             buffer.is_skinned = mesh.is_skinned;
             buffer.source_model_path = mesh.source_model_path;
             buffer.source_animation_path = mesh.source_animation_path;
             buffer.animation_time = 0.0f;
-            if (buffer.is_skinned) {
+            if (buffer.is_skinned && !kDisableSkinnedAnimationForDebug) {
                 GltfSkinningFrames frames;
                 std::string skin_error;
                 if (LoadGltfSkinningFrames(buffer.source_model_path,
@@ -1280,6 +1382,15 @@ void VoxelRenderer::setBlockMeshes(const std::vector<MeshData>& meshes) {
                     buffer.frame_count = 0;
                     buffer.skin_palette.clear();
                 }
+            } else if (buffer.is_skinned) {
+                buffer.joint_count = 0;
+                buffer.frame_count = 0;
+                buffer.animation_duration = 0.0f;
+                buffer.skin_palette.clear();
+                std::fprintf(stderr,
+                             "skinned renderer: animation disabled for debug (T-pose) mesh[%zu] model='%s'\n",
+                             i,
+                             buffer.source_model_path.c_str());
             }
             block_meshes_[i] = buffer;
         }

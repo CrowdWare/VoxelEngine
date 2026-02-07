@@ -92,6 +92,7 @@ private:
         VkBuffer buffer = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
         uint32_t vertex_count = 0;
+        std::vector<Vertex> cpu_vertices;
         bool is_skinned = false;
         std::string source_model_path;
         std::string source_animation_path;
@@ -134,6 +135,7 @@ private:
     VkRenderPass render_pass_;
     VkPipelineLayout pipeline_layout_;
     VkPipeline pipeline_;
+    VkPipeline pipeline_skinned_;
     VkShaderModule vert_shader_;
     VkShaderModule frag_shader_;
     VkDescriptorSetLayout descriptor_set_layout_;
