@@ -16,6 +16,8 @@ struct TileDef {
     int height_cm = 60;
     int scale_percent = 100;
     int height_blocks = 1;
+    bool collision = true;
+    bool has_collision = false;
     std::string material;
     std::string placement;
     std::string category;

@@ -380,6 +380,10 @@ static bool ParseTilesFile(const std::string& path,
                 tile.height_cm = value.int_value;
             else if (name == "scale_percent" && value.type == sml::PropertyValue::Int)
                 tile.scale_percent = value.int_value;
+            else if (name == "collision" && value.type == sml::PropertyValue::Boolean) {
+                tile.collision = value.bool_value;
+                tile.has_collision = true;
+            }
         }
         void endElement(const std::string& name) override {
             if (name == "Tile") {
